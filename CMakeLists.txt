@@ -19,7 +19,10 @@ target_compile_options(mex PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-
 
 find_package(GTest REQUIRED)
 
-add_executable(test_book tests/book_test.cpp)
+add_executable(test_book
+    tests/book_test.cpp
+    tests/exchange_session_test.cpp
+)
 target_link_libraries(test_book PRIVATE mex GTest::gtest_main)
 target_include_directories(test_book PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_compile_options(test_book PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
