@@ -169,7 +169,8 @@ void BenchMixedBook()
     {
         for (std::uint32_t i = 0; i < kOps; ++i)
         {
-            const bool cancel = !live.empty() && (next() % 5U) == 0U;
+            const bool full = live.size() >= kCapacity;
+            const bool cancel = !live.empty() && (full || (next() % 5U) == 0U);
             if (cancel)
             {
                 const std::size_t index = static_cast<std::size_t>(next() % live.size());
@@ -183,10 +184,6 @@ void BenchMixedBook()
                 continue;
             }
 
-            if (live.size() >= kCapacity)
-            {
-                continue;
-            }
             const std::int64_t price = static_cast<std::int64_t>(next() % kLevels);
             const mex::SubmitResult result = book.SubmitLimitOrder(mex::Side::kBuy, price, 1, NoFill{});
             if (result.order_id == mex::kInvalidOrderId)
