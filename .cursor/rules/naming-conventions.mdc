@@ -1,0 +1,26 @@
+---
+description: C++ naming, Allman braces, composition
+alwaysApply: true
+---
+
+# Naming and style (modern_exchng_cpp)
+
+Apply this to new and edited code. It overrides Google C++ Style. This rule is complete for naming and braces; do not open a doc for a routine edit.
+
+| Kind | Convention | Example |
+|------|------------|---------|
+| Functions | PascalCase | `SubmitLimitOrder`, `CancelOrder` |
+| Variables | snake_case | `order_id`, `price_level` |
+| Classes / structs / types | PascalCase | `OrderNode`, `PriceLevel`, `Book` |
+| Class members | snake_case + trailing `_` | `order_id_` |
+| Struct members | snake_case, no `_` suffix | `order_id` |
+| Constants / `constexpr` | `k` + PascalCase | `kMaxOrders`, `kInvalid` |
+| Enumerators | `k` + PascalCase | `Side::kBuy` |
+| Namespaces | lowercase, underscores if needed | `order_book` |
+| Template parameters | PascalCase | `TNode` |
+| Macros | avoid; if required, `ALL_CAPS` | `MAX_ORDERS` |
+
+- **Braces:** Allman — `{` and `}` on their own line for every block, including `if` / `else` / `while` / `for`.
+- **Design:** composition over inheritance.
+- **Files:** lowercase with underscores or dashes; `.hpp` / `.cpp` to match existing files.
+- **Legacy names:** leave `INVALID` and `Side::Buy` / `Side::Sell` in `book.hpp` unless the user asks to rename them. New code uses `kInvalid`, `Side::kBuy`, `Side::kSell`.

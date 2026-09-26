@@ -1,0 +1,16 @@
+---
+description: C++ errors, RAII, and hot-path limits beyond the naming rule
+globs: "**/*.{cpp,hpp,h,cc}"
+alwaysApply: false
+---
+
+# C++ constraints (modern_exchng_cpp)
+
+Naming, braces, and composition are already in the always-on naming rule. Do not restate them and do not open a doc to confirm them.
+
+- No `throw` / `try` / `catch`. Fallible functions return `std::expected` or `std::optional` and are `[[nodiscard]]`. Convert third-party exceptions at the boundary.
+- RAII. Rule of Zero, or all five special members. No naked `new` / `delete`. `unique_ptr` owns; a raw `T*` does not.
+- After startup, the matching path does not allocate, use virtual calls, or use RTTI. Hot data stays contiguous.
+- Headers: `#pragma once`, self-contained, no global `using namespace`.
+
+Examples live in `docs/cpp-coding-standards.md`. Read one heading only when this change depends on it (Error Handling, Resource Management, or Low-Latency). Do not read the whole file.
