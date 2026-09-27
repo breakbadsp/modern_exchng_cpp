@@ -148,16 +148,19 @@ int g_counter = 0;
 | **F.3** | Keep functions short and simple |
 | **F.4** | If a function could run at compile time, declare it `constexpr` |
 | **F.8** | Prefer pure functions |
-| **F.16** | Cheaply-copied "in" parameters by value, others by `const&` |
+| **F.16** | Trivially-copyable and cheap-to-copy "in" parameters by value (value semantics); larger types by reference. A pointer only when null is a valid state |
 | **F.20** | For "out" values, prefer return values to output parameters |
 | **F.21** | To return multiple "out" values, prefer a struct |
 | **F.43** | Never return a pointer or reference to a local object |
 
 ```cpp
-// F.16: cheap types by value, others by const&
+// F.16: trivially-copyable and cheap-to-copy → pass by value (value semantics).
+// A reference is never null; a pointer only when null is a valid state.
 void Print(int x);
-void Analyze(const std::string& data);
+void Analyze(const std::string& data);  // large: const reference
 void Transform(std::string s);  // sink: by value, will move
+void Bump(Counter c);  // cheap handle: value semantics
+void Observe(const Widget* widget);  // null is a valid "nothing to draw" state
 
 // F.20 + F.21: return a struct, not output parameters
 struct ParseResult
@@ -304,7 +307,7 @@ the wrong tool inside a matching loop.
 | Rule | Summary |
 |------|---------|
 | **R.1** | Manage resources automatically via RAII |
-| **R.3** | A raw pointer (`T*`) is non-owning |
+| **R.3** | A raw pointer (`T*`) is non-owning, and only when null is a valid state. Otherwise use a reference |
 | **R.5** | Prefer scoped objects; don't heap-allocate unnecessarily |
 | **R.10** | Avoid `malloc()`/`free()` |
 | **R.11** | Avoid calling `new`/`delete` explicitly |
@@ -316,8 +319,14 @@ the wrong tool inside a matching loop.
 auto widget = std::make_unique<Widget>("config");
 auto cache = std::make_shared<Cache>(1024);
 
-// R.3: raw pointer = non-owning observer
-void Render(const Widget* w)
+// R.3: a reference is never null. A raw pointer is a non-owning observer
+// only when null is a valid state.
+void Render(const Widget& w)
+{
+    w.Draw();
+}
+
+void RenderIfPresent(const Widget* w)
 {
     if (w)
     {
@@ -849,6 +858,8 @@ Before marking C++ work complete:
 - [ ] No `throw`/`try`/`catch` anywhere in project code
 - [ ] Fallible functions return `std::expected`, marked `[[nodiscard]]`
 - [ ] Optional values are `std::optional`, not a sentinel or a null pointer
+- [ ] References by default; a pointer only when null is a valid state;
+  trivially-copyable and cheap-to-copy types passed by value (value semantics)
 - [ ] No `using namespace` in headers at global scope (SF.7)
 - [ ] Headers have include guards and are self-contained (SF.8, SF.11)
 - [ ] Locks use RAII (`scoped_lock`/`lock_guard`), always named (CP.44)

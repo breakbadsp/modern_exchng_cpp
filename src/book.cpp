@@ -19,7 +19,7 @@ namespace
                                     bool p_ascending)
 {
   const auto it = std::lower_bound(p_levels.begin(), p_levels.end(), p_price,
-                                   [p_ascending](const PriceLevel &p_level, std::int64_t p_key)
+                                   [p_ascending](PriceLevel p_level, std::int64_t p_key)
                                    {
                                      if (p_ascending)
                                      {

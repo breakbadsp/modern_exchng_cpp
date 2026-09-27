@@ -33,7 +33,7 @@ private:
   std::vector<Fill> records_;
 };
 
-inline void ExpectFill(const Fill &p_fill, mex::OrderId p_maker_id, std::int64_t p_price,
+inline void ExpectFill(Fill p_fill, mex::OrderId p_maker_id, std::int64_t p_price,
                        std::uint32_t p_quantity)
 {
   EXPECT_EQ(p_fill.maker_id_, p_maker_id);
@@ -41,7 +41,7 @@ inline void ExpectFill(const Fill &p_fill, mex::OrderId p_maker_id, std::int64_t
   EXPECT_EQ(p_fill.quantity_, p_quantity);
 }
 
-inline void ExpectResting(const mex::SubmitResult &p_result, std::uint32_t p_quantity)
+inline void ExpectResting(mex::SubmitResult p_result, std::uint32_t p_quantity)
 {
   EXPECT_EQ(p_result.status_, mex::SubmitStatus::Accepted);
   EXPECT_EQ(p_result.filled_qty_, 0u);
@@ -49,7 +49,7 @@ inline void ExpectResting(const mex::SubmitResult &p_result, std::uint32_t p_qua
   EXPECT_NE(p_result.order_id_, mex::kInvalidOrderId);
 }
 
-inline void ExpectTrade(const mex::SubmitResult &p_result, std::uint32_t p_filled,
+inline void ExpectTrade(mex::SubmitResult p_result, std::uint32_t p_filled,
                         std::uint32_t p_remaining, bool p_rests)
 {
   EXPECT_EQ(p_result.status_, mex::SubmitStatus::Accepted);
@@ -65,7 +65,7 @@ inline void ExpectTrade(const mex::SubmitResult &p_result, std::uint32_t p_fille
   }
 }
 
-inline void ExpectRejected(const mex::SubmitResult &p_result, std::uint32_t p_remaining)
+inline void ExpectRejected(mex::SubmitResult p_result, std::uint32_t p_remaining)
 {
   EXPECT_EQ(p_result.status_, mex::SubmitStatus::Rejected);
   EXPECT_EQ(p_result.filled_qty_, 0u);
@@ -85,8 +85,7 @@ inline mex::SubmitResult SubmitMarket(mex::Book &p_book, FillLog &p_log, mex::Si
   return p_book.SubmitMarketOrder(p_side, p_quantity, p_log.Callback());
 }
 
-inline void ExpectLevelList(const mex::Book &p_book, const mex::PriceLevel &p_level,
-                            mex::Side p_side)
+inline void ExpectLevelList(const mex::Book &p_book, mex::PriceLevel p_level, mex::Side p_side)
 {
   EXPECT_GT(p_level.order_count_, 0u);
   EXPECT_GT(p_level.total_qty_, 0u);

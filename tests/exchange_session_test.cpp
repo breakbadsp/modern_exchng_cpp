@@ -412,7 +412,7 @@ private:
     }
 
     live_.erase(std::remove_if(live_.begin(), live_.end(),
-                               [this](const Live &p_order)
+                               [this](Live p_order)
                                {
                                  return std::find(filled_ids_.begin(), filled_ids_.end(),
                                                   p_order.book_id_) != filled_ids_.end();
@@ -425,8 +425,8 @@ private:
     return true;
   }
 
-  [[nodiscard]] bool SameResult(const mex::SubmitResult &p_book_result,
-                                const mex::SubmitResult &p_shadow_result) const
+  [[nodiscard]] bool SameResult(mex::SubmitResult p_book_result,
+                                mex::SubmitResult p_shadow_result) const
   {
     if (p_book_result.status_ != p_shadow_result.status_ ||
         p_book_result.filled_qty_ != p_shadow_result.filled_qty_ ||

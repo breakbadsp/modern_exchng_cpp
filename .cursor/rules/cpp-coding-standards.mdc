@@ -10,7 +10,8 @@ Naming, braces, and composition are already in the always-on naming rule. Do not
 
 - No `throw` / `try` / `catch`. Fallible functions return `std::expected` or `std::optional` and are `[[nodiscard]]`. Convert third-party exceptions at the boundary.
 - RAII. Rule of Zero, or all five special members. No naked `new` / `delete`. `unique_ptr` owns; a raw `T*` does not.
+- References by default (a reference is never null). A pointer only when null is a valid state. Trivially-copyable and cheap-to-copy types: pass by value and prefer value semantics.
 - After startup, the matching path does not allocate, use virtual calls, or use RTTI. Hot data stays contiguous.
 - Headers: `#pragma once`, self-contained, no global `using namespace`.
 
-Examples live in `docs/cpp-coding-standards.md`. Read one heading only when this change depends on it (Error Handling, Resource Management, or Low-Latency). Do not read the whole file.
+Examples live in `docs/cpp-coding-standards.md`. Read one heading only when this change depends on it (Error Handling, Resource Management, Functions, or Low-Latency). Do not read the whole file.
