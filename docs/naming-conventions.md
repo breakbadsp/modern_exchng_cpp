@@ -8,13 +8,22 @@ silently overridden.
 ## This project's explicit rules (locked)
 
 - **Functions**: PascalCase — e.g. `SubmitLimitOrder`, `CancelOrder`
-- **Variables**: snake_case — e.g. `order_id`, `price_level`
+- **Function parameters**: `p_` prefix + snake_case — e.g. `p_order_id`,
+  `p_price_level`. Applies to every named parameter (free functions,
+  methods, lambdas). Call sites never use these names; the prefix marks
+  parameters at a glance inside the function body.
+- **Local variables**: snake_case — e.g. `order_id`, `price_level` (no
+  `p_` prefix)
 - **Classes / structs / types**: PascalCase — e.g. `OrderNode`,
   `PriceLevel`, `Book`
 - **Curly braces**: always on their own line (Allman style), for every
   block
 - **Curly braces**: mandatory for every `if`/`else`/`while`/`for`, even a
   single-statement body — never omitted
+- **Indentation**: **2 spaces** per level; never tabs. Enforced by
+  [clang-format](https://clang.llvm.org/docs/ClangFormat.html) via
+  `.clang-format` at the repo root (`cmake --build build --target format`
+  to apply, `clang-format-check` in CI-style verify).
 - **Composition preferred over inheritance** wherever a design choice
   exists
 
@@ -24,13 +33,14 @@ silently overridden.
   own extension choice — this project currently uses `.hpp`; keep `.hpp`
   for consistency with the files already produced unless you'd rather
   switch)
-- **Class data members**: `variable_name_` — snake_case plus a trailing
-  underscore, so a member is visually distinct from a local or a
-  parameter at the call site. Classes only.
-- **Struct data members**: plain snake_case, no trailing underscore —
-  structs are for passive data (Google's struct-vs-class distinction,
-  which this project already follows: `OrderNode` and `PriceLevel` are
-  structs)
+- **Class data members**: `variable_name_` — snake_case plus a **mandatory
+  trailing underscore** on every class data member (including nested
+  helper classes), so members are distinct from `p_` parameters and
+  locals.
+- **Struct data members**: plain snake_case, no `p_` prefix and no
+  trailing underscore — structs are passive aggregates only (`OrderNode`,
+  `PriceLevel`, `SubmitResult`, test fixtures). Do not use a struct
+  solely to avoid the trailing underscore on class members.
 - **Constants / `constexpr`**: `k` prefix + PascalCase — e.g.
   `kMaxOrders`, `kInvalid`
 - **Enumerators**: named like constants — `k` prefix + PascalCase

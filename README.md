@@ -9,7 +9,7 @@ Single-symbol limit order book with price-time (FIFO) matching. One `mex::Book` 
 - **Single-threaded**, no heap allocation on the hot path after setup
 - Prices are **integer ticks** (`int64_t`); quantities are `uint32_t`
 
-Design background and locked decisions: [`prep/design-spec.md`](prep/design-spec.md). C++ style: [`docs/naming-conventions.md`](docs/naming-conventions.md).
+Design background and locked decisions: [`prep/design-spec.md`](prep/design-spec.md). C++ style: [`docs/naming-conventions.md`](docs/naming-conventions.md) (2-space indent, Allman braces; enforced by [`.clang-format`](.clang-format)).
 
 ## Requirements
 
@@ -31,6 +31,15 @@ ctest --preset ninja --output-on-failure
 Binaries land in `build/`: static library `libmex.a`, tests `test_book`, benchmark `bench_book`.
 
 Configure fails if CMake is not using Ninja (`-G Ninja` or the preset above).
+
+## Formatting
+
+Requires `clang-format` on `PATH`. After configure:
+
+```bash
+cmake --build build --target format              # rewrite sources to match .clang-format
+cmake --build build --target clang-format-check  # verify (non-zero if drift)
+```
 
 ## Performance
 
@@ -68,7 +77,7 @@ docs/         naming and C++ standards reference
 
 mex::Book book(max_orders, max_price_levels);
 
-auto on_fill = [](mex::OrderId maker_id, std::int64_t price, std::uint32_t qty) {
+auto on_fill = [](mex::OrderId p_maker_id, std::int64_t p_price, std::uint32_t p_qty) {
     // record trade
 };
 

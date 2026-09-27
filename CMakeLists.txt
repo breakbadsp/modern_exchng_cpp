@@ -34,3 +34,30 @@ target_compile_options(bench_book PRIVATE -O3 -DNDEBUG -Wall -Wextra -Wpedantic 
 
 enable_testing()
 add_test(NAME test_book COMMAND test_book)
+
+find_program(CLANG_FORMAT_EXECUTABLE NAMES clang-format)
+if(CLANG_FORMAT_EXECUTABLE)
+    set(MEX_FORMAT_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/book.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/book.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/order_node.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/price_level.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/types.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_bench.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_checks.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_session_test.cpp
+    )
+    add_custom_target(format
+        COMMAND ${CLANG_FORMAT_EXECUTABLE} -i ${MEX_FORMAT_SOURCES}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "clang-format: rewrite project C++ sources"
+    )
+    add_custom_target(clang-format-check
+        COMMAND ${CLANG_FORMAT_EXECUTABLE} --dry-run --Werror ${MEX_FORMAT_SOURCES}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "clang-format: verify project C++ sources"
+    )
+else()
+    message(STATUS "clang-format not found; format and clang-format-check targets omitted")
+endif()

@@ -10,10 +10,11 @@ Apply this to new and edited code. It overrides Google C++ Style. This rule is c
 | Kind | Convention | Example |
 |------|------------|---------|
 | Functions | PascalCase | `SubmitLimitOrder`, `CancelOrder` |
-| Variables | snake_case | `order_id`, `price_level` |
+| Function parameters | `p_` + snake_case | `p_order_id`, `p_price` |
+| Local variables | snake_case | `order_id`, `price_level` |
 | Classes / structs / types | PascalCase | `OrderNode`, `PriceLevel`, `Book` |
-| Class members | snake_case + trailing `_` | `order_id_` |
-| Struct members | snake_case, no `_` suffix | `order_id` |
+| Class data members | snake_case + trailing `_` | `order_id_` (required on every class member) |
+| Struct data members | snake_case, no `_` suffix | `order_id` (aggregate/POD fields only) |
 | Constants / `constexpr` | `k` + PascalCase | `kMaxOrders`, `kInvalid` |
 | Enumerators | `k` + PascalCase | `Side::kBuy` |
 | Namespaces | lowercase, underscores if needed | `order_book` |
@@ -21,6 +22,7 @@ Apply this to new and edited code. It overrides Google C++ Style. This rule is c
 | Macros | avoid; if required, `ALL_CAPS` | `MAX_ORDERS` |
 
 - **Braces:** Allman — `{` and `}` on their own line for every block, including `if` / `else` / `while` / `for`.
+- **Indentation:** 2 spaces per level; no tabs. Match `.clang-format` (run `format` / `clang-format-check` CMake targets).
 - **Design:** composition over inheritance.
 - **Files:** lowercase with underscores or dashes; `.hpp` / `.cpp` to match existing files.
 - **Legacy names:** leave `INVALID` and `Side::Buy` / `Side::Sell` in `book.hpp` unless the user asks to rename them. New code uses `kInvalid`, `Side::kBuy`, `Side::kSell`.

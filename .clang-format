@@ -1,0 +1,15 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+BreakBeforeBraces: Allman
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ColumnLimit: 100
+InsertBraces: true
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+NamespaceIndentation: None
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup

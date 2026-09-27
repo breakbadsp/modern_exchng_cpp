@@ -51,17 +51,20 @@ reference; this file summarizes it and applies it in every example below.
 7. **Design for the hot path** — on performance-critical code, prefer
    compile-time dispatch, contiguous data, and predictable branches over
    generality. See "Low-Latency & High-Throughput" below.
-8. **This project's naming, always** — PascalCase functions/types,
-   snake_case variables, Allman braces, mandatory braces on every
-   conditional/loop. See [naming-conventions.md](naming-conventions.md).
+8. **This project's naming and layout, always** — PascalCase
+   functions/types, snake_case variables, Allman braces, mandatory braces
+   on every conditional/loop, **2-space indentation** (no tabs). See
+   [naming-conventions.md](naming-conventions.md). Layout is enforced by
+   `.clang-format` at the repo root.
 
 ## Naming (summary — full rules in [naming-conventions.md](naming-conventions.md))
 
 - Functions: PascalCase — `SubmitLimitOrder`, `CancelOrder`
-- Variables (locals, parameters, struct data members): snake_case —
-  `order_id`, `price_level`
-- Class data members: snake_case with a trailing underscore —
-  `pool_`, `free_list_`
+- Function parameters: `p_` + snake_case — `p_order_id`, `p_price`
+- Locals: snake_case — `order_id`, `price_level`
+- Struct data members: snake_case — `order_id`, `filled_qty`
+- Class data members: snake_case with a **mandatory** trailing
+  underscore — `pool_`, `free_list_`
 - Classes / structs / types / template parameters: PascalCase —
   `OrderNode`, `PriceLevel`
 - Constants / `constexpr`: `k` + PascalCase — `kMaxOrders`
@@ -73,6 +76,9 @@ reference; this file summarizes it and applies it in every example below.
   brace convention
 - Curly braces: **mandatory** for every `if`/`else`/`while`/`for`, even
   single-statement bodies
+- Indentation: **2 spaces** per level, no tabs — run
+  `cmake --build build --target format` or `clang-format -i` on touched
+  files; `clang-format-check` fails if sources drift from `.clang-format`
 
 ## Simplicity
 
@@ -839,7 +845,10 @@ Before marking C++ work complete:
 - [ ] Headers have include guards and are self-contained (SF.8, SF.11)
 - [ ] Locks use RAII (`scoped_lock`/`lock_guard`), always named (CP.44)
 - [ ] Hot-path code avoids virtual dispatch, RTTI, and pointer-chasing
-- [ ] Functions: PascalCase. Variables: snake_case. Classes: PascalCase.
-- [ ] Class members trailing-underscore; struct members plain
+- [ ] Functions: PascalCase. Parameters: `p_` + snake_case. Locals:
+  snake_case. Classes: PascalCase.
+- [ ] Every class data member ends with `_`; struct aggregate fields stay
+  plain snake_case
 - [ ] Every brace on its own line; braces present on every conditional/loop
+- [ ] 2-space indentation, no tabs; `clang-format-check` passes
 - [ ] No magic numbers (ES.45)

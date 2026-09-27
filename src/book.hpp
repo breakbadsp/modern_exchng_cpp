@@ -18,93 +18,78 @@ namespace mex
 class Book
 {
 public:
-    explicit Book(std::uint32_t max_orders, std::uint32_t max_price_levels);
+  explicit Book(std::uint32_t p_max_orders, std::uint32_t p_max_price_levels);
 
-    template <typename OnFill>
-    [[nodiscard]] SubmitResult SubmitLimitOrder(Side side,
-                                                 std::int64_t price,
-                                                 std::uint32_t quantity,
-                                                 OnFill&& on_fill);
+  template <typename OnFill>
+  [[nodiscard]] SubmitResult SubmitLimitOrder(Side p_side, std::int64_t p_price,
+                                              std::uint32_t p_quantity, OnFill &&p_on_fill);
 
-    template <typename OnFill>
-    [[nodiscard]] SubmitResult SubmitMarketOrder(Side side,
-                                                  std::uint32_t quantity,
-                                                  OnFill&& on_fill);
+  template <typename OnFill>
+  [[nodiscard]] SubmitResult SubmitMarketOrder(Side p_side, std::uint32_t p_quantity,
+                                               OnFill &&p_on_fill);
 
-    [[nodiscard]] bool CancelOrder(OrderId order_id);
+  [[nodiscard]] bool CancelOrder(OrderId p_order_id);
 
-    [[nodiscard]] const OrderNode& Order(OrderId order_id) const;
+  [[nodiscard]] const OrderNode &Order(OrderId p_order_id) const;
 
-    [[nodiscard]] const std::vector<PriceLevel>& Bids() const;
-    [[nodiscard]] const std::vector<PriceLevel>& Asks() const;
+  [[nodiscard]] const std::vector<PriceLevel> &Bids() const;
+  [[nodiscard]] const std::vector<PriceLevel> &Asks() const;
 
-    [[nodiscard]] std::uint32_t FreeSlotCount() const;
-    [[nodiscard]] std::uint32_t MaxOrders() const;
+  [[nodiscard]] std::uint32_t FreeSlotCount() const;
+  [[nodiscard]] std::uint32_t MaxOrders() const;
 
 private:
-    using FillCallback = void (*)(OrderId maker_id,
-                                  std::int64_t price,
-                                  std::uint32_t quantity,
-                                  void* context);
+  using FillCallback = void (*)(OrderId p_maker_id, std::int64_t p_price, std::uint32_t p_quantity,
+                                void *p_context);
 
-    [[nodiscard]] SubmitResult SubmitLimit(Side side,
-                                            std::int64_t price,
-                                            std::uint32_t quantity,
-                                            FillCallback on_fill,
-                                            void* context);
+  [[nodiscard]] SubmitResult SubmitLimit(Side p_side, std::int64_t p_price,
+                                         std::uint32_t p_quantity, FillCallback p_on_fill,
+                                         void *p_context);
 
-    [[nodiscard]] SubmitResult SubmitMarket(Side side,
-                                             std::uint32_t quantity,
-                                             FillCallback on_fill,
-                                             void* context);
+  [[nodiscard]] SubmitResult SubmitMarket(Side p_side, std::uint32_t p_quantity,
+                                          FillCallback p_on_fill, void *p_context);
 
-    // limit_price is absent for a market order, which crosses every level.
-    [[nodiscard]] std::uint32_t Match(Side aggressor,
-                                      std::optional<std::int64_t> limit_price,
-                                      std::uint32_t quantity,
-                                      FillCallback on_fill,
-                                      void* context);
+  // limit_price is absent for a market order, which crosses every level.
+  [[nodiscard]] std::uint32_t Match(Side p_aggressor, std::optional<std::int64_t> p_limit_price,
+                                    std::uint32_t p_quantity, FillCallback p_on_fill,
+                                    void *p_context);
 
-    [[nodiscard]] bool CanRest(Side side, std::int64_t price) const;
+  [[nodiscard]] bool CanRest(Side p_side, std::int64_t p_price) const;
 
-    OrderId Rest(Side side, std::int64_t price, std::uint32_t quantity);
+  OrderId Rest(Side p_side, std::int64_t p_price, std::uint32_t p_quantity);
 
-    void Unlink(PriceLevel& level, OrderId order_id);
-    void Release(OrderId order_id);
+  void Unlink(PriceLevel &p_level, OrderId p_order_id);
+  void Release(OrderId p_order_id);
 
-    [[nodiscard]] std::vector<PriceLevel>& Levels(Side side);
-    [[nodiscard]] const std::vector<PriceLevel>& Levels(Side side) const;
+  [[nodiscard]] std::vector<PriceLevel> &Levels(Side p_side);
+  [[nodiscard]] const std::vector<PriceLevel> &Levels(Side p_side) const;
 
-    std::vector<OrderNode> pool_;
-    std::vector<OrderId> free_list_;
-    std::vector<PriceLevel> bids_;
-    std::vector<PriceLevel> asks_;
-    std::uint32_t max_price_levels_;
+  std::vector<OrderNode> pool_;
+  std::vector<OrderId> free_list_;
+  std::vector<PriceLevel> bids_;
+  std::vector<PriceLevel> asks_;
+  std::uint32_t max_price_levels_;
 };
 
 template <typename OnFill>
-SubmitResult Book::SubmitLimitOrder(Side side,
-                                    std::int64_t price,
-                                    std::uint32_t quantity,
-                                    OnFill&& on_fill)
+SubmitResult Book::SubmitLimitOrder(Side p_side, std::int64_t p_price, std::uint32_t p_quantity,
+                                    OnFill &&p_on_fill)
 {
-    using Callback = std::remove_reference_t<OnFill>;
-    auto thunk = [](OrderId maker_id, std::int64_t fill_price, std::uint32_t fill_qty, void* context)
-    {
-        (*static_cast<Callback*>(context))(maker_id, fill_price, fill_qty);
-    };
-    return SubmitLimit(side, price, quantity, thunk, &on_fill);
+  using Callback = std::remove_reference_t<OnFill>;
+  auto thunk =
+      [](OrderId p_maker_id, std::int64_t p_fill_price, std::uint32_t p_fill_qty, void *p_context)
+  { (*static_cast<Callback *>(p_context))(p_maker_id, p_fill_price, p_fill_qty); };
+  return SubmitLimit(p_side, p_price, p_quantity, thunk, &p_on_fill);
 }
 
 template <typename OnFill>
-SubmitResult Book::SubmitMarketOrder(Side side, std::uint32_t quantity, OnFill&& on_fill)
+SubmitResult Book::SubmitMarketOrder(Side p_side, std::uint32_t p_quantity, OnFill &&p_on_fill)
 {
-    using Callback = std::remove_reference_t<OnFill>;
-    auto thunk = [](OrderId maker_id, std::int64_t fill_price, std::uint32_t fill_qty, void* context)
-    {
-        (*static_cast<Callback*>(context))(maker_id, fill_price, fill_qty);
-    };
-    return SubmitMarket(side, quantity, thunk, &on_fill);
+  using Callback = std::remove_reference_t<OnFill>;
+  auto thunk =
+      [](OrderId p_maker_id, std::int64_t p_fill_price, std::uint32_t p_fill_qty, void *p_context)
+  { (*static_cast<Callback *>(p_context))(p_maker_id, p_fill_price, p_fill_qty); };
+  return SubmitMarket(p_side, p_quantity, thunk, &p_on_fill);
 }
 
-}  // namespace mex
+} // namespace mex
