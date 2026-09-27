@@ -14,6 +14,7 @@ namespace mex
 
 // One symbol. Storage is fixed at construction: a full pool or a full
 // price ladder rejects the order instead of allocating.
+// Throughput: ./build/bench_book (-O3). See docs/performance.md.
 class Book
 {
 public:
