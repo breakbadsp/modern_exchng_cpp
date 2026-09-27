@@ -1,7 +1,5 @@
 #pragma once
 
-#include "order_node.hpp"
-#include "price_level.hpp"
 #include "types.hpp"
 
 #include <cstdint>
@@ -15,6 +13,10 @@ namespace mex
 // One symbol. Storage is fixed at construction: a full pool or a full
 // price ladder rejects the order instead of allocating.
 // Throughput: ./build/bench_book (-O3). See docs/performance.md.
+//
+// Contracts (C++26, GCC -fcontracts) catch caller bugs and broken book
+// structure. Zero quantity and a full pool are normal rejects, not failures.
+// clang-format off
 class Book
 {
 public:
@@ -22,15 +24,19 @@ public:
 
   template <typename OnFill>
   [[nodiscard]] SubmitResult SubmitLimitOrder(Side p_side, std::int64_t p_price,
-                                              std::uint32_t p_quantity, OnFill &&p_on_fill);
+                                              const std::uint32_t p_quantity, OnFill &&p_on_fill)
+    post (r: static_cast<std::uint64_t>(r.filled_qty_) + r.remaining_ == p_quantity);
 
   template <typename OnFill>
-  [[nodiscard]] SubmitResult SubmitMarketOrder(Side p_side, std::uint32_t p_quantity,
-                                               OnFill &&p_on_fill);
+  [[nodiscard]] SubmitResult SubmitMarketOrder(Side p_side, const std::uint32_t p_quantity,
+                                               OnFill &&p_on_fill)
+    post (r: r.filled_qty_ <= p_quantity && r.remaining_ == 0 && r.order_id_ == kInvalidOrderId);
 
-  [[nodiscard]] bool CancelOrder(OrderId p_order_id);
+  [[nodiscard]] bool CancelOrder(const OrderId p_order_id)
+    post (r: !r || (p_order_id < MaxOrders() && Order(p_order_id).quantity_ == 0));
 
-  [[nodiscard]] const OrderNode &Order(OrderId p_order_id) const;
+  [[nodiscard]] const OrderNode &Order(OrderId p_order_id) const
+    pre (p_order_id < MaxOrders());
 
   [[nodiscard]] const std::vector<PriceLevel> &Bids() const;
   [[nodiscard]] const std::vector<PriceLevel> &Asks() const;
@@ -56,10 +62,16 @@ private:
 
   [[nodiscard]] bool CanRest(Side p_side, std::int64_t p_price) const;
 
-  OrderId Rest(Side p_side, std::int64_t p_price, std::uint32_t p_quantity);
+  OrderId Rest(Side p_side, std::int64_t p_price, std::uint32_t p_quantity)
+    pre (!free_list_.empty() && p_quantity > 0);
 
-  void Unlink(PriceLevel &p_level, OrderId p_order_id);
-  void Release(OrderId p_order_id);
+  void Unlink(PriceLevel &p_level, OrderId p_order_id)
+    pre (p_order_id < pool_.size() && p_level.order_count_ > 0 &&
+         (pool_[p_order_id].prev_ != kInvalidOrderId || p_level.head_ == p_order_id) &&
+         (pool_[p_order_id].next_ != kInvalidOrderId || p_level.tail_ == p_order_id));
+
+  void Release(OrderId p_order_id)
+    pre (p_order_id < pool_.size());
 
   [[nodiscard]] std::vector<PriceLevel> &Levels(Side p_side);
   [[nodiscard]] const std::vector<PriceLevel> &Levels(Side p_side) const;
@@ -70,10 +82,11 @@ private:
   std::vector<PriceLevel> asks_;
   std::uint32_t max_price_levels_;
 };
+// clang-format on
 
 template <typename OnFill>
-SubmitResult Book::SubmitLimitOrder(Side p_side, std::int64_t p_price, std::uint32_t p_quantity,
-                                    OnFill &&p_on_fill)
+SubmitResult Book::SubmitLimitOrder(Side p_side, std::int64_t p_price,
+                                    const std::uint32_t p_quantity, OnFill &&p_on_fill)
 {
   using Callback = std::remove_reference_t<OnFill>;
   auto thunk =
@@ -83,7 +96,8 @@ SubmitResult Book::SubmitLimitOrder(Side p_side, std::int64_t p_price, std::uint
 }
 
 template <typename OnFill>
-SubmitResult Book::SubmitMarketOrder(Side p_side, std::uint32_t p_quantity, OnFill &&p_on_fill)
+SubmitResult Book::SubmitMarketOrder(Side p_side, const std::uint32_t p_quantity,
+                                     OnFill &&p_on_fill)
 {
   using Callback = std::remove_reference_t<OnFill>;
   auto thunk =

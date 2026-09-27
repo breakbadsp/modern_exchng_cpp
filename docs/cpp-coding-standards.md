@@ -2,7 +2,7 @@
 
 Human reference. Cursor enforces a short subset in `.cursor/rules/`; agents should open one heading here, not this whole file.
 
-Modern C++ (C++23, with an eye on C++26) coding standards for this
+Modern C++ (C++26) coding standards for this
 project. Built on the [C++ Core Guidelines](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines),
 but diverges from them in three deliberate ways: **no exceptions**
 (Result/Option error handling instead), **this project's own naming
@@ -775,16 +775,23 @@ if (order.quantity == 0) [[unlikely]]
 }
 ```
 
-## C++26 Outlook (use with caution)
+## C++26 contracts
 
-C++26's headline features are **not yet uniformly available** across
-this project's dual-compiler build (see `requirements.md` — both latest
-GCC and latest Clang). As of this writing: GCC 16.1+ has experimental
-support for **Contracts** (`-fcontracts`) and **Reflection**
-(`-freflection`); mainline Clang has neither — only unmerged
-experimental forks exist. Code using either feature will not compile
-under Clang as-is. Don't use them in shared project code until Clang
-mainline catches up; fine to experiment with GCC-only tooling/tests.
+The book uses C++26 contracts (`pre`, `post`, `contract_assert`) at API
+boundaries and for book-structure bugs (bad order id, unlinking a node
+that is not on the level). Do not put a contract on a helper that only
+repeats the assignments in the body, and do not re-check `Side` on every
+private method. GCC 16 implements them with `-fcontracts`. The default
+semantic is `enforce`: a failed check terminates. Clang 22 does not
+parse the syntax, so configure with GCC.
+
+A contract failure is a bug. A zero quantity and a full pool are normal
+rejects and stay return values. Cancel of an id that is not resting
+returns false. `Order` requires an id inside the pool.
+
+`bench_book` builds with `-fcontract-evaluation-semantic=ignore` so the
+measurement is the book, not the checks. Reflection (`-freflection`)
+stays unused.
 
 Separately: the "Profiles" proposal (which would have added automatic
 signed/unsigned conversion safety, `std::narrow<T>`) was **voted out**

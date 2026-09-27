@@ -312,7 +312,8 @@ private:
   {
     if (p_left[i].price_ != p_right[i].price_ || p_left[i].quantities_ != p_right[i].quantities_)
     {
-      ADD_FAILURE() << "level " << i << " price " << p_left[i].price_ << " vs " << p_right[i].price_;
+      ADD_FAILURE() << "level " << i << " price " << p_left[i].price_ << " vs "
+                    << p_right[i].price_;
       return false;
     }
   }

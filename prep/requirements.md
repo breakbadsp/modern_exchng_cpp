@@ -2,11 +2,10 @@
 
 ## Environment / Toolchain
 
-- C++, compiled with both latest GCC and latest Clang
+- C++26, GCC 16+ (`-fcontracts`). Clang 22 does not parse contracts, so
+this tree configures with GCC only
 - Arch Linux (Omarchy), all latest versions
-- Latest available `std::c++` standard supported by both compilers
-(currently C++23 in practice — C++26 features like contracts/reflection
-are GCC-only right now, so held back)
+- Reflection stays unused; it is still GCC-only and not needed here
 
 ## Scope
 

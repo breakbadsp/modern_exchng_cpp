@@ -142,8 +142,7 @@ void BenchTakeBest()
       {
         for (std::uint32_t i = 0; i < kOrders; ++i)
         {
-          const mex::SubmitResult result =
-              book.SubmitLimitOrder(mex::Side::Buy, 1000, 1, NoFill{});
+          const mex::SubmitResult result = book.SubmitLimitOrder(mex::Side::Buy, 1000, 1, NoFill{});
           if (result.filled_qty_ != 1 || result.order_id_ != mex::kInvalidOrderId)
           {
             std::cerr << "take did not fill one lot\n";

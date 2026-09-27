@@ -119,7 +119,7 @@ SubmitResult Book::SubmitMarket(Side p_side, std::uint32_t p_quantity, FillCallb
   return Accepted(filled, 0, kInvalidOrderId);
 }
 
-bool Book::CancelOrder(OrderId p_order_id)
+bool Book::CancelOrder(const OrderId p_order_id)
 {
   if (p_order_id >= pool_.size())
   {
@@ -134,10 +134,12 @@ bool Book::CancelOrder(OrderId p_order_id)
 
   std::vector<PriceLevel> &levels = Levels(node.side_);
   const std::size_t index = FindLevel(levels, node.price_, Ascending(node.side_));
+  contract_assert(index < levels.size() && levels[index].price_ == node.price_);
   PriceLevel &level = levels[index];
+  contract_assert(level.total_qty_ >= node.quantity_ && level.order_count_ > 0);
+  Unlink(level, p_order_id);
   level.total_qty_ -= node.quantity_;
   --level.order_count_;
-  Unlink(level, p_order_id);
   Release(p_order_id);
 
   if (level.order_count_ == 0)
@@ -174,7 +176,9 @@ std::uint32_t Book::Match(Side p_aggressor, std::optional<std::int64_t> p_limit_
     while (remaining > 0 && level.head_ != kInvalidOrderId)
     {
       const OrderId maker_id = level.head_;
+      contract_assert(maker_id < pool_.size());
       OrderNode &maker = pool_[maker_id];
+      contract_assert(maker.quantity_ > 0 && level.total_qty_ >= maker.quantity_);
       const std::uint32_t fill_qty = remaining < maker.quantity_ ? remaining : maker.quantity_;
 
       maker.quantity_ -= fill_qty;
@@ -190,6 +194,7 @@ std::uint32_t Book::Match(Side p_aggressor, std::optional<std::int64_t> p_limit_
       }
     }
 
+    contract_assert(level.head_ != kInvalidOrderId || level.order_count_ == 0);
     if (level.order_count_ == 0)
     {
       levels.pop_back();
@@ -220,6 +225,7 @@ OrderId Book::Rest(Side p_side, std::int64_t p_price, std::uint32_t p_quantity)
 {
   const OrderId order_id = free_list_.back();
   free_list_.pop_back();
+  contract_assert(order_id < pool_.size());
 
   OrderNode &node = pool_[order_id];
   node.price_ = p_price;
@@ -232,6 +238,7 @@ OrderId Book::Rest(Side p_side, std::int64_t p_price, std::uint32_t p_quantity)
   if (index < levels.size() && levels[index].price_ == p_price)
   {
     PriceLevel &level = levels[index];
+    contract_assert(level.order_count_ > 0 && level.tail_ < pool_.size());
     node.prev_ = level.tail_;
     if (level.tail_ != kInvalidOrderId)
     {
@@ -247,6 +254,8 @@ OrderId Book::Rest(Side p_side, std::int64_t p_price, std::uint32_t p_quantity)
     return order_id;
   }
 
+  contract_assert(levels.size() < static_cast<std::size_t>(max_price_levels_) &&
+                  levels.size() < levels.capacity());
   node.prev_ = kInvalidOrderId;
   PriceLevel level;
   level.price_ = p_price;

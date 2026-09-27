@@ -13,7 +13,7 @@ Design background and locked decisions: [`prep/design-spec.md`](prep/design-spec
 
 ## Requirements
 
-- C++23 compiler (GCC or Clang)
+- C++26 compiler: GCC 16+ with `-fcontracts` (Clang does not implement contracts yet)
 - [CMake](https://cmake.org/) 3.20+
 - [Ninja](https://ninja-build.org/) (required generator)
 - [Google Test](https://github.com/google/googletest) (system package, e.g. `gtest` on Arch)
@@ -64,7 +64,7 @@ Methodology and full table: [`docs/performance.md`](docs/performance.md).
 ## Layout
 
 ```
-src/          types, OrderNode, PriceLevel, Book (headers + book.cpp)
+src/          book types (`types.hpp`) and Book (`book.hpp`, `book.cpp`)
 tests/        Google Test suites and book_checks helpers
 prep/         design spec and requirements
 docs/         naming and C++ standards reference
