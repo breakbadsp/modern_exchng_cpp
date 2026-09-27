@@ -62,14 +62,14 @@ reference; this file summarizes it and applies it in every example below.
 - Functions: PascalCase — `SubmitLimitOrder`, `CancelOrder`
 - Function parameters: `p_` + snake_case — `p_order_id`, `p_price`
 - Locals: snake_case — `order_id`, `price_level`
-- Struct data members: snake_case — `order_id`, `filled_qty`
+- Struct data members: snake_case + trailing `_` — `order_id_`, `filled_qty_`
 - Class data members: snake_case with a **mandatory** trailing
   underscore — `pool_`, `free_list_`
 - Classes / structs / types / template parameters: PascalCase —
   `OrderNode`, `PriceLevel`
 - Constants / `constexpr`: `k` + PascalCase — `kMaxOrders`
-- Enumerators: `k` + PascalCase — `Side::kBuy`, not `Side::Buy` or
-  `Side::BUY`
+- Enumerators: PascalCase, no `k` — `Side::Buy`; first enumerator
+  explicitly initialized (`Buy = 0`)
 - Namespaces: lowercase, underscores if multi-word
 - Curly braces: **always on their own line** (Allman) — a deliberate
   divergence from the Core Guidelines' and Google's own end-of-line
@@ -830,7 +830,8 @@ Before marking C++ work complete:
 - [ ] No heap allocation reachable once the system is running
 - [ ] Objects initialized at declaration (ES.20)
 - [ ] `const`/`constexpr` by default (Con.1, ES.25)
-- [ ] `enum class` with `k`-prefixed enumerators, not plain `enum`
+- [ ] `enum class` with PascalCase enumerators (no `k`); first enumerator
+  explicitly initialized; not plain `enum`
 - [ ] `nullptr`, never `0`/`NULL` (ES.47)
 - [ ] No narrowing conversions (ES.46); `-Wconversion -Wsign-conversion` clean
 - [ ] No C-style casts (ES.48)
@@ -847,7 +848,7 @@ Before marking C++ work complete:
 - [ ] Hot-path code avoids virtual dispatch, RTTI, and pointer-chasing
 - [ ] Functions: PascalCase. Parameters: `p_` + snake_case. Locals:
   snake_case. Classes: PascalCase.
-- [ ] Every class data member ends with `_`; struct aggregate fields stay
+- [ ] Every class and struct data member ends with `_`
   plain snake_case
 - [ ] Every brace on its own line; braces present on every conditional/loop
 - [ ] 2-space indentation, no tabs; `clang-format-check` passes

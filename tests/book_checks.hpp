@@ -11,9 +11,9 @@ namespace book_test
 
 struct Fill
 {
-  mex::OrderId maker_id = mex::kInvalidOrderId;
-  std::int64_t price = 0;
-  std::uint32_t quantity = 0;
+  mex::OrderId maker_id_ = mex::kInvalidOrderId;
+  std::int64_t price_ = 0;
+  std::uint32_t quantity_ = 0;
 };
 
 class FillLog
@@ -36,41 +36,41 @@ private:
 inline void ExpectFill(const Fill &p_fill, mex::OrderId p_maker_id, std::int64_t p_price,
                        std::uint32_t p_quantity)
 {
-  EXPECT_EQ(p_fill.maker_id, p_maker_id);
-  EXPECT_EQ(p_fill.price, p_price);
-  EXPECT_EQ(p_fill.quantity, p_quantity);
+  EXPECT_EQ(p_fill.maker_id_, p_maker_id);
+  EXPECT_EQ(p_fill.price_, p_price);
+  EXPECT_EQ(p_fill.quantity_, p_quantity);
 }
 
 inline void ExpectResting(const mex::SubmitResult &p_result, std::uint32_t p_quantity)
 {
-  EXPECT_EQ(p_result.status, mex::SubmitStatus::kAccepted);
-  EXPECT_EQ(p_result.filled_qty, 0u);
-  EXPECT_EQ(p_result.remaining, p_quantity);
-  EXPECT_NE(p_result.order_id, mex::kInvalidOrderId);
+  EXPECT_EQ(p_result.status_, mex::SubmitStatus::Accepted);
+  EXPECT_EQ(p_result.filled_qty_, 0u);
+  EXPECT_EQ(p_result.remaining_, p_quantity);
+  EXPECT_NE(p_result.order_id_, mex::kInvalidOrderId);
 }
 
 inline void ExpectTrade(const mex::SubmitResult &p_result, std::uint32_t p_filled,
                         std::uint32_t p_remaining, bool p_rests)
 {
-  EXPECT_EQ(p_result.status, mex::SubmitStatus::kAccepted);
-  EXPECT_EQ(p_result.filled_qty, p_filled);
-  EXPECT_EQ(p_result.remaining, p_remaining);
+  EXPECT_EQ(p_result.status_, mex::SubmitStatus::Accepted);
+  EXPECT_EQ(p_result.filled_qty_, p_filled);
+  EXPECT_EQ(p_result.remaining_, p_remaining);
   if (p_rests)
   {
-    EXPECT_NE(p_result.order_id, mex::kInvalidOrderId);
+    EXPECT_NE(p_result.order_id_, mex::kInvalidOrderId);
   }
   else
   {
-    EXPECT_EQ(p_result.order_id, mex::kInvalidOrderId);
+    EXPECT_EQ(p_result.order_id_, mex::kInvalidOrderId);
   }
 }
 
 inline void ExpectRejected(const mex::SubmitResult &p_result, std::uint32_t p_remaining)
 {
-  EXPECT_EQ(p_result.status, mex::SubmitStatus::kRejected);
-  EXPECT_EQ(p_result.filled_qty, 0u);
-  EXPECT_EQ(p_result.remaining, p_remaining);
-  EXPECT_EQ(p_result.order_id, mex::kInvalidOrderId);
+  EXPECT_EQ(p_result.status_, mex::SubmitStatus::Rejected);
+  EXPECT_EQ(p_result.filled_qty_, 0u);
+  EXPECT_EQ(p_result.remaining_, p_remaining);
+  EXPECT_EQ(p_result.order_id_, mex::kInvalidOrderId);
 }
 
 inline mex::SubmitResult SubmitLimit(mex::Book &p_book, FillLog &p_log, mex::Side p_side,
@@ -88,10 +88,10 @@ inline mex::SubmitResult SubmitMarket(mex::Book &p_book, FillLog &p_log, mex::Si
 inline void ExpectLevelList(const mex::Book &p_book, const mex::PriceLevel &p_level,
                             mex::Side p_side)
 {
-  EXPECT_GT(p_level.order_count, 0u);
-  EXPECT_GT(p_level.total_qty, 0u);
+  EXPECT_GT(p_level.order_count_, 0u);
+  EXPECT_GT(p_level.total_qty_, 0u);
 
-  mex::OrderId id = p_level.head;
+  mex::OrderId id = p_level.head_;
   mex::OrderId prev = mex::kInvalidOrderId;
   std::uint32_t count = 0;
   std::uint64_t sum = 0;
@@ -104,48 +104,48 @@ inline void ExpectLevelList(const mex::Book &p_book, const mex::PriceLevel &p_le
     }
 
     const mex::OrderNode &node = p_book.Order(id);
-    EXPECT_EQ(node.prev, prev);
-    EXPECT_EQ(node.next == mex::kInvalidOrderId || node.next != id, true);
-    EXPECT_GT(node.quantity, 0u);
-    EXPECT_EQ(node.price, p_level.price);
-    EXPECT_EQ(node.side, p_side);
-    sum += node.quantity;
+    EXPECT_EQ(node.prev_, prev);
+    EXPECT_EQ(node.next_ == mex::kInvalidOrderId || node.next_ != id, true);
+    EXPECT_GT(node.quantity_, 0u);
+    EXPECT_EQ(node.price_, p_level.price_);
+    EXPECT_EQ(node.side_, p_side);
+    sum += node.quantity_;
     ++count;
     prev = id;
-    id = node.next;
+    id = node.next_;
   }
 
-  EXPECT_EQ(count, p_level.order_count);
-  EXPECT_EQ(sum, p_level.total_qty);
-  EXPECT_EQ(prev, p_level.tail);
+  EXPECT_EQ(count, p_level.order_count_);
+  EXPECT_EQ(sum, p_level.total_qty_);
+  EXPECT_EQ(prev, p_level.tail_);
 }
 
 inline void ExpectBookInvariants(const mex::Book &p_book)
 {
   if (!p_book.Bids().empty() && !p_book.Asks().empty())
   {
-    EXPECT_LT(p_book.Bids().back().price, p_book.Asks().back().price);
+    EXPECT_LT(p_book.Bids().back().price_, p_book.Asks().back().price_);
   }
 
   std::uint32_t live_orders = 0;
   for (const mex::PriceLevel &level : p_book.Bids())
   {
-    ExpectLevelList(p_book, level, mex::Side::kBuy);
-    live_orders += level.order_count;
+    ExpectLevelList(p_book, level, mex::Side::Buy);
+    live_orders += level.order_count_;
   }
   for (const mex::PriceLevel &level : p_book.Asks())
   {
-    ExpectLevelList(p_book, level, mex::Side::kSell);
-    live_orders += level.order_count;
+    ExpectLevelList(p_book, level, mex::Side::Sell);
+    live_orders += level.order_count_;
   }
 
   for (std::size_t i = 1; i < p_book.Bids().size(); ++i)
   {
-    EXPECT_LT(p_book.Bids()[i - 1].price, p_book.Bids()[i].price);
+    EXPECT_LT(p_book.Bids()[i - 1].price_, p_book.Bids()[i].price_);
   }
   for (std::size_t i = 1; i < p_book.Asks().size(); ++i)
   {
-    EXPECT_GT(p_book.Asks()[i - 1].price, p_book.Asks()[i].price);
+    EXPECT_GT(p_book.Asks()[i - 1].price_, p_book.Asks()[i].price_);
   }
 
   EXPECT_EQ(live_orders + p_book.FreeSlotCount(), p_book.MaxOrders());

@@ -12,7 +12,7 @@ namespace mex
 namespace
 {
 
-[[nodiscard]] bool Ascending(Side p_side) { return p_side == Side::kBuy; }
+[[nodiscard]] bool Ascending(Side p_side) { return p_side == Side::Buy; }
 
 // Bids are stored low to high, asks high to low, so the best price is always back().
 [[nodiscard]] std::size_t FindLevel(const std::vector<PriceLevel> &p_levels, std::int64_t p_price,
@@ -23,16 +23,16 @@ namespace
                                    {
                                      if (p_ascending)
                                      {
-                                       return p_level.price < p_key;
+                                       return p_level.price_ < p_key;
                                      }
-                                     return p_level.price > p_key;
+                                     return p_level.price_ > p_key;
                                    });
   return static_cast<std::size_t>(it - p_levels.begin());
 }
 
 [[nodiscard]] bool Crosses(Side p_aggressor, std::int64_t p_limit_price, std::int64_t p_maker_price)
 {
-  if (p_aggressor == Side::kBuy)
+  if (p_aggressor == Side::Buy)
   {
     return p_limit_price >= p_maker_price;
   }
@@ -43,20 +43,20 @@ namespace
                                     OrderId p_order_id)
 {
   SubmitResult result;
-  result.status = SubmitStatus::kAccepted;
-  result.filled_qty = p_filled_qty;
-  result.remaining = p_remaining;
-  result.order_id = p_order_id;
+  result.status_ = SubmitStatus::Accepted;
+  result.filled_qty_ = p_filled_qty;
+  result.remaining_ = p_remaining;
+  result.order_id_ = p_order_id;
   return result;
 }
 
 [[nodiscard]] SubmitResult Rejected(std::uint32_t p_remaining)
 {
   SubmitResult result;
-  result.status = SubmitStatus::kRejected;
-  result.filled_qty = 0;
-  result.remaining = p_remaining;
-  result.order_id = kInvalidOrderId;
+  result.status_ = SubmitStatus::Rejected;
+  result.filled_qty_ = 0;
+  result.remaining_ = p_remaining;
+  result.order_id_ = kInvalidOrderId;
   return result;
 }
 
@@ -127,20 +127,20 @@ bool Book::CancelOrder(OrderId p_order_id)
   }
 
   OrderNode &node = pool_[p_order_id];
-  if (node.quantity == 0)
+  if (node.quantity_ == 0)
   {
     return false;
   }
 
-  std::vector<PriceLevel> &levels = Levels(node.side);
-  const std::size_t index = FindLevel(levels, node.price, Ascending(node.side));
+  std::vector<PriceLevel> &levels = Levels(node.side_);
+  const std::size_t index = FindLevel(levels, node.price_, Ascending(node.side_));
   PriceLevel &level = levels[index];
-  level.total_qty -= node.quantity;
-  --level.order_count;
+  level.total_qty_ -= node.quantity_;
+  --level.order_count_;
   Unlink(level, p_order_id);
   Release(p_order_id);
 
-  if (level.order_count == 0)
+  if (level.order_count_ == 0)
   {
     levels.erase(levels.begin() + static_cast<std::ptrdiff_t>(index));
   }
@@ -161,36 +161,36 @@ std::uint32_t Book::Match(Side p_aggressor, std::optional<std::int64_t> p_limit_
                           std::uint32_t p_quantity, FillCallback p_on_fill, void *p_context)
 {
   std::uint32_t remaining = p_quantity;
-  std::vector<PriceLevel> &levels = Levels(p_aggressor == Side::kBuy ? Side::kSell : Side::kBuy);
+  std::vector<PriceLevel> &levels = Levels(p_aggressor == Side::Buy ? Side::Sell : Side::Buy);
 
   while (remaining > 0 && !levels.empty())
   {
     PriceLevel &level = levels.back();
-    if (p_limit_price.has_value() && !Crosses(p_aggressor, *p_limit_price, level.price))
+    if (p_limit_price.has_value() && !Crosses(p_aggressor, *p_limit_price, level.price_))
     {
       break;
     }
 
-    while (remaining > 0 && level.head != kInvalidOrderId)
+    while (remaining > 0 && level.head_ != kInvalidOrderId)
     {
-      const OrderId maker_id = level.head;
+      const OrderId maker_id = level.head_;
       OrderNode &maker = pool_[maker_id];
-      const std::uint32_t fill_qty = remaining < maker.quantity ? remaining : maker.quantity;
+      const std::uint32_t fill_qty = remaining < maker.quantity_ ? remaining : maker.quantity_;
 
-      maker.quantity -= fill_qty;
-      level.total_qty -= fill_qty;
+      maker.quantity_ -= fill_qty;
+      level.total_qty_ -= fill_qty;
       remaining -= fill_qty;
-      p_on_fill(maker_id, level.price, fill_qty, p_context);
+      p_on_fill(maker_id, level.price_, fill_qty, p_context);
 
-      if (maker.quantity == 0)
+      if (maker.quantity_ == 0)
       {
         Unlink(level, maker_id);
-        --level.order_count;
+        --level.order_count_;
         Release(maker_id);
       }
     }
 
-    if (level.order_count == 0)
+    if (level.order_count_ == 0)
     {
       levels.pop_back();
     }
@@ -208,7 +208,7 @@ bool Book::CanRest(Side p_side, std::int64_t p_price) const
 
   const std::vector<PriceLevel> &levels = Levels(p_side);
   const std::size_t index = FindLevel(levels, p_price, Ascending(p_side));
-  const bool level_exists = index < levels.size() && levels[index].price == p_price;
+  const bool level_exists = index < levels.size() && levels[index].price_ == p_price;
   if (level_exists)
   {
     return true;
@@ -222,38 +222,38 @@ OrderId Book::Rest(Side p_side, std::int64_t p_price, std::uint32_t p_quantity)
   free_list_.pop_back();
 
   OrderNode &node = pool_[order_id];
-  node.price = p_price;
-  node.quantity = p_quantity;
-  node.side = p_side;
-  node.next = kInvalidOrderId;
+  node.price_ = p_price;
+  node.quantity_ = p_quantity;
+  node.side_ = p_side;
+  node.next_ = kInvalidOrderId;
 
   std::vector<PriceLevel> &levels = Levels(p_side);
   const std::size_t index = FindLevel(levels, p_price, Ascending(p_side));
-  if (index < levels.size() && levels[index].price == p_price)
+  if (index < levels.size() && levels[index].price_ == p_price)
   {
     PriceLevel &level = levels[index];
-    node.prev = level.tail;
-    if (level.tail != kInvalidOrderId)
+    node.prev_ = level.tail_;
+    if (level.tail_ != kInvalidOrderId)
     {
-      pool_[level.tail].next = order_id;
+      pool_[level.tail_].next_ = order_id;
     }
     else
     {
-      level.head = order_id;
+      level.head_ = order_id;
     }
-    level.tail = order_id;
-    ++level.order_count;
-    level.total_qty += p_quantity;
+    level.tail_ = order_id;
+    ++level.order_count_;
+    level.total_qty_ += p_quantity;
     return order_id;
   }
 
-  node.prev = kInvalidOrderId;
+  node.prev_ = kInvalidOrderId;
   PriceLevel level;
-  level.price = p_price;
-  level.head = order_id;
-  level.tail = order_id;
-  level.order_count = 1;
-  level.total_qty = p_quantity;
+  level.price_ = p_price;
+  level.head_ = order_id;
+  level.tail_ = order_id;
+  level.order_count_ = 1;
+  level.total_qty_ = p_quantity;
   levels.insert(levels.begin() + static_cast<std::ptrdiff_t>(index), level);
   return order_id;
 }
@@ -261,37 +261,37 @@ OrderId Book::Rest(Side p_side, std::int64_t p_price, std::uint32_t p_quantity)
 void Book::Unlink(PriceLevel &p_level, OrderId p_order_id)
 {
   OrderNode &node = pool_[p_order_id];
-  if (node.prev != kInvalidOrderId)
+  if (node.prev_ != kInvalidOrderId)
   {
-    pool_[node.prev].next = node.next;
+    pool_[node.prev_].next_ = node.next_;
   }
   else
   {
-    p_level.head = node.next;
+    p_level.head_ = node.next_;
   }
 
-  if (node.next != kInvalidOrderId)
+  if (node.next_ != kInvalidOrderId)
   {
-    pool_[node.next].prev = node.prev;
+    pool_[node.next_].prev_ = node.prev_;
   }
   else
   {
-    p_level.tail = node.prev;
+    p_level.tail_ = node.prev_;
   }
 }
 
 void Book::Release(OrderId p_order_id)
 {
   OrderNode &node = pool_[p_order_id];
-  node.quantity = 0;
-  node.prev = kInvalidOrderId;
-  node.next = kInvalidOrderId;
+  node.quantity_ = 0;
+  node.prev_ = kInvalidOrderId;
+  node.next_ = kInvalidOrderId;
   free_list_.push_back(p_order_id);
 }
 
 std::vector<PriceLevel> &Book::Levels(Side p_side)
 {
-  if (p_side == Side::kBuy)
+  if (p_side == Side::Buy)
   {
     return bids_;
   }
@@ -300,7 +300,7 @@ std::vector<PriceLevel> &Book::Levels(Side p_side)
 
 const std::vector<PriceLevel> &Book::Levels(Side p_side) const
 {
-  if (p_side == Side::kBuy)
+  if (p_side == Side::Buy)
   {
     return bids_;
   }

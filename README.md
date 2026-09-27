@@ -81,8 +81,8 @@ auto on_fill = [](mex::OrderId p_maker_id, std::int64_t p_price, std::uint32_t p
     // record trade
 };
 
-mex::SubmitResult r = book.SubmitLimitOrder(mex::Side::kBuy, 100, 10, on_fill);
-// r.status, r.filled_qty, r.remaining, r.order_id
+mex::SubmitResult r = book.SubmitLimitOrder(mex::Side::Buy, 100, 10, on_fill);
+// r.status_, r.filled_qty_, r.remaining_, r.order_id_
 
 book.CancelOrder(r.order_id);
 ```

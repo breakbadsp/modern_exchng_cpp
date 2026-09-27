@@ -37,14 +37,16 @@ silently overridden.
   trailing underscore** on every class data member (including nested
   helper classes), so members are distinct from `p_` parameters and
   locals.
-- **Struct data members**: plain snake_case, no `p_` prefix and no
-  trailing underscore — structs are passive aggregates only (`OrderNode`,
-  `PriceLevel`, `SubmitResult`, test fixtures). Do not use a struct
-  solely to avoid the trailing underscore on class members.
+- **Struct data members**: snake_case plus a **mandatory trailing
+  underscore**, same as class members (`OrderNode`, `PriceLevel`,
+  `SubmitResult`, test fixtures). Structs remain passive aggregates; the
+  suffix is for consistency, not a license to hide invariants on a
+  `struct` that should be a `class`.
 - **Constants / `constexpr`**: `k` prefix + PascalCase — e.g.
   `kMaxOrders`, `kInvalid`
-- **Enumerators**: named like constants — `k` prefix + PascalCase
-  (`Side::kBuy`, not `Side::Buy`)
+- **Enumerators**: PascalCase, no `k` prefix (`Side::Buy`, not
+  `Side::kBuy`). The **first** enumerator in each `enum class` must have
+  an explicit initializer (usually `= 0`).
 - **Namespaces**: lowercase, underscores if multi-word
 - **Macros**: avoid entirely where possible; if unavoidable,
   `ALL_CAPS_WITH_UNDERSCORES`
@@ -59,11 +61,3 @@ silently overridden.
 - Everything else above is additive (filling a gap Google covers and
   this project hadn't specified), not a divergence.
 
-## Known gaps against current code (not yet applied)
-
-- `INVALID` in `book.hpp` should become `kInvalid` under the constant
-  rule above.
-- `Side::Buy` / `Side::Sell` should become `Side::kBuy` / `Side::kSell`
-  under the enumerator rule above.
-- Neither has been renamed yet — say the word if you want these applied
-  to the existing files.

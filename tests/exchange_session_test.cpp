@@ -17,14 +17,14 @@ using book_test::ExpectBookInvariants;
 
 struct Trade
 {
-  std::int64_t price = 0;
-  std::uint32_t quantity = 0;
+  std::int64_t price_ = 0;
+  std::uint32_t quantity_ = 0;
 };
 
 struct LevelSnap
 {
-  std::int64_t price = 0;
-  std::vector<std::uint32_t> quantities;
+  std::int64_t price_ = 0;
+  std::vector<std::uint32_t> quantities_;
 };
 
 // Independent price-time book. It uses maps and deques, not the pool, so agreement
@@ -85,14 +85,14 @@ public:
   [[nodiscard]] bool Cancel(mex::OrderId p_order_id)
   {
     if (p_order_id == mex::kInvalidOrderId || p_order_id >= orders_.size() ||
-        !orders_[p_order_id].live)
+        !orders_[p_order_id].live_)
     {
       return false;
     }
 
     Order &order = orders_[p_order_id];
-    auto &levels = Levels(order.side);
-    auto level = levels.find(order.price);
+    auto &levels = Levels(order.side_);
+    auto level = levels.find(order.price_);
     auto &queue = level->second;
     const auto it = std::find(queue.begin(), queue.end(), p_order_id);
     queue.erase(it);
@@ -100,8 +100,8 @@ public:
     {
       levels.erase(level);
     }
-    order.live = false;
-    order.quantity = 0;
+    order.live_ = false;
+    order.quantity_ = 0;
     ++free_slots_;
     return true;
   }
@@ -113,16 +113,16 @@ public:
   [[nodiscard]] std::vector<LevelSnap> LevelsAscending(mex::Side p_side) const
   {
     std::vector<LevelSnap> snaps;
-    const auto &levels = p_side == mex::Side::kBuy ? bids_ : asks_;
+    const auto &levels = p_side == mex::Side::Buy ? bids_ : asks_;
     snaps.reserve(levels.size());
     for (const auto &[price, queue] : levels)
     {
       LevelSnap snap;
-      snap.price = price;
-      snap.quantities.reserve(queue.size());
+      snap.price_ = price;
+      snap.quantities_.reserve(queue.size());
       for (const mex::OrderId order_id : queue)
       {
-        snap.quantities.push_back(orders_[order_id].quantity);
+        snap.quantities_.push_back(orders_[order_id].quantity_);
       }
       snaps.push_back(std::move(snap));
     }
@@ -132,17 +132,17 @@ public:
 private:
   struct Order
   {
-    bool live = false;
-    mex::Side side = mex::Side::kBuy;
-    std::int64_t price = 0;
-    std::uint32_t quantity = 0;
+    bool live_ = false;
+    mex::Side side_ = mex::Side::Buy;
+    std::int64_t price_ = 0;
+    std::uint32_t quantity_ = 0;
   };
 
   using Queue = std::deque<mex::OrderId>;
 
   [[nodiscard]] std::map<std::int64_t, Queue> &Levels(mex::Side p_side)
   {
-    if (p_side == mex::Side::kBuy)
+    if (p_side == mex::Side::Buy)
     {
       return bids_;
     }
@@ -155,7 +155,7 @@ private:
     {
       return false;
     }
-    const auto &levels = p_side == mex::Side::kBuy ? bids_ : asks_;
+    const auto &levels = p_side == mex::Side::Buy ? bids_ : asks_;
     if (levels.find(p_price) != levels.end())
     {
       return true;
@@ -172,10 +172,10 @@ private:
       orders_.resize(static_cast<std::size_t>(order_id) + 1);
     }
     Order &order = orders_[order_id];
-    order.live = true;
-    order.side = p_side;
-    order.price = p_price;
-    order.quantity = p_quantity;
+    order.live_ = true;
+    order.side_ = p_side;
+    order.price_ = p_price;
+    order.quantity_ = p_quantity;
     Levels(p_side)[p_price].push_back(order_id);
     --free_slots_;
     return order_id;
@@ -185,11 +185,11 @@ private:
   Match(mex::Side p_aggressor, std::optional<std::int64_t> p_limit_price, std::uint32_t p_quantity)
   {
     std::uint32_t remaining = p_quantity;
-    auto &levels = Levels(p_aggressor == mex::Side::kBuy ? mex::Side::kSell : mex::Side::kBuy);
+    auto &levels = Levels(p_aggressor == mex::Side::Buy ? mex::Side::Sell : mex::Side::Buy);
 
     while (remaining > 0 && !levels.empty())
     {
-      auto level = p_aggressor == mex::Side::kBuy ? levels.begin() : std::prev(levels.end());
+      auto level = p_aggressor == mex::Side::Buy ? levels.begin() : std::prev(levels.end());
       if (p_limit_price.has_value() && !Crosses(p_aggressor, *p_limit_price, level->first))
       {
         break;
@@ -200,13 +200,13 @@ private:
       {
         const mex::OrderId maker_id = queue.front();
         Order &maker = orders_[maker_id];
-        const std::uint32_t fill_qty = remaining < maker.quantity ? remaining : maker.quantity;
-        maker.quantity -= fill_qty;
+        const std::uint32_t fill_qty = remaining < maker.quantity_ ? remaining : maker.quantity_;
+        maker.quantity_ -= fill_qty;
         remaining -= fill_qty;
         trades_.push_back(Trade{level->first, fill_qty});
-        if (maker.quantity == 0)
+        if (maker.quantity_ == 0)
         {
-          maker.live = false;
+          maker.live_ = false;
           queue.pop_front();
           ++free_slots_;
         }
@@ -223,7 +223,7 @@ private:
   [[nodiscard]] static bool Crosses(mex::Side p_aggressor, std::int64_t p_limit_price,
                                     std::int64_t p_maker_price)
   {
-    if (p_aggressor == mex::Side::kBuy)
+    if (p_aggressor == mex::Side::Buy)
     {
       return p_limit_price >= p_maker_price;
     }
@@ -234,20 +234,20 @@ private:
                                                   mex::OrderId p_order_id)
   {
     mex::SubmitResult result;
-    result.status = mex::SubmitStatus::kAccepted;
-    result.filled_qty = p_filled;
-    result.remaining = p_remaining;
-    result.order_id = p_order_id;
+    result.status_ = mex::SubmitStatus::Accepted;
+    result.filled_qty_ = p_filled;
+    result.remaining_ = p_remaining;
+    result.order_id_ = p_order_id;
     return result;
   }
 
   [[nodiscard]] static mex::SubmitResult Rejected(std::uint32_t p_remaining)
   {
     mex::SubmitResult result;
-    result.status = mex::SubmitStatus::kRejected;
-    result.filled_qty = 0;
-    result.remaining = p_remaining;
-    result.order_id = mex::kInvalidOrderId;
+    result.status_ = mex::SubmitStatus::Rejected;
+    result.filled_qty_ = 0;
+    result.remaining_ = p_remaining;
+    result.order_id_ = mex::kInvalidOrderId;
     return result;
   }
 
@@ -265,19 +265,19 @@ private:
 {
   std::vector<LevelSnap> snaps;
   const std::vector<mex::PriceLevel> &stored =
-      p_side == mex::Side::kBuy ? p_book.Bids() : p_book.Asks();
-  if (p_side == mex::Side::kBuy)
+      p_side == mex::Side::Buy ? p_book.Bids() : p_book.Asks();
+  if (p_side == mex::Side::Buy)
   {
     snaps.reserve(stored.size());
     for (const mex::PriceLevel &level : stored)
     {
       LevelSnap snap;
-      snap.price = level.price;
-      mex::OrderId id = level.head;
+      snap.price_ = level.price_;
+      mex::OrderId id = level.head_;
       while (id != mex::kInvalidOrderId)
       {
-        snap.quantities.push_back(p_book.Order(id).quantity);
-        id = p_book.Order(id).next;
+        snap.quantities_.push_back(p_book.Order(id).quantity_);
+        id = p_book.Order(id).next_;
       }
       snaps.push_back(std::move(snap));
     }
@@ -288,12 +288,12 @@ private:
   for (auto it = stored.rbegin(); it != stored.rend(); ++it)
   {
     LevelSnap snap;
-    snap.price = it->price;
-    mex::OrderId id = it->head;
+    snap.price_ = it->price_;
+    mex::OrderId id = it->head_;
     while (id != mex::kInvalidOrderId)
     {
-      snap.quantities.push_back(p_book.Order(id).quantity);
-      id = p_book.Order(id).next;
+      snap.quantities_.push_back(p_book.Order(id).quantity_);
+      id = p_book.Order(id).next_;
     }
     snaps.push_back(std::move(snap));
   }
@@ -310,9 +310,9 @@ private:
   }
   for (std::size_t i = 0; i < p_left.size(); ++i)
   {
-    if (p_left[i].price != p_right[i].price || p_left[i].quantities != p_right[i].quantities)
+    if (p_left[i].price_ != p_right[i].price_ || p_left[i].quantities_ != p_right[i].quantities_)
     {
-      ADD_FAILURE() << "level " << i << " price " << p_left[i].price << " vs " << p_right[i].price;
+      ADD_FAILURE() << "level " << i << " price " << p_left[i].price_ << " vs " << p_right[i].price_;
       return false;
     }
   }
@@ -345,8 +345,8 @@ public:
       return false;
     }
     const Live order = live_[p_live_index];
-    const bool book_cancelled = book_.CancelOrder(order.book_id);
-    const bool shadow_cancelled = shadow_.Cancel(order.shadow_id);
+    const bool book_cancelled = book_.CancelOrder(order.book_id_);
+    const bool shadow_cancelled = shadow_.Cancel(order.shadow_id_);
     if (book_cancelled != shadow_cancelled)
     {
       ADD_FAILURE() << "step " << step_ << " cancel disagreed";
@@ -380,8 +380,8 @@ public:
 private:
   struct Live
   {
-    mex::OrderId book_id = mex::kInvalidOrderId;
-    mex::OrderId shadow_id = mex::kInvalidOrderId;
+    mex::OrderId book_id_ = mex::kInvalidOrderId;
+    mex::OrderId shadow_id_ = mex::kInvalidOrderId;
   };
 
   [[nodiscard]] bool Submit(bool p_market, mex::Side p_side, std::int64_t p_price,
@@ -393,7 +393,7 @@ private:
         [this](mex::OrderId p_maker_id, std::int64_t p_fill_price, std::uint32_t p_fill_qty)
     {
       trades_.push_back(Trade{p_fill_price, p_fill_qty});
-      if (book_.Order(p_maker_id).quantity == 0)
+      if (book_.Order(p_maker_id).quantity_ == 0)
       {
         filled_ids_.push_back(p_maker_id);
       }
@@ -414,12 +414,12 @@ private:
                                [this](const Live &p_order)
                                {
                                  return std::find(filled_ids_.begin(), filled_ids_.end(),
-                                                  p_order.book_id) != filled_ids_.end();
+                                                  p_order.book_id_) != filled_ids_.end();
                                }),
                 live_.end());
-    if (book_result.order_id != mex::kInvalidOrderId)
+    if (book_result.order_id_ != mex::kInvalidOrderId)
     {
-      live_.push_back(Live{book_result.order_id, shadow_result.order_id});
+      live_.push_back(Live{book_result.order_id_, shadow_result.order_id_});
     }
     return true;
   }
@@ -427,15 +427,15 @@ private:
   [[nodiscard]] bool SameResult(const mex::SubmitResult &p_book_result,
                                 const mex::SubmitResult &p_shadow_result) const
   {
-    if (p_book_result.status != p_shadow_result.status ||
-        p_book_result.filled_qty != p_shadow_result.filled_qty ||
-        p_book_result.remaining != p_shadow_result.remaining ||
-        (p_book_result.order_id == mex::kInvalidOrderId) !=
-            (p_shadow_result.order_id == mex::kInvalidOrderId))
+    if (p_book_result.status_ != p_shadow_result.status_ ||
+        p_book_result.filled_qty_ != p_shadow_result.filled_qty_ ||
+        p_book_result.remaining_ != p_shadow_result.remaining_ ||
+        (p_book_result.order_id_ == mex::kInvalidOrderId) !=
+            (p_shadow_result.order_id_ == mex::kInvalidOrderId))
     {
-      ADD_FAILURE() << "step " << step_ << " result filled " << p_book_result.filled_qty << " vs "
-                    << p_shadow_result.filled_qty << " remaining " << p_book_result.remaining
-                    << " vs " << p_shadow_result.remaining;
+      ADD_FAILURE() << "step " << step_ << " result filled " << p_book_result.filled_qty_ << " vs "
+                    << p_shadow_result.filled_qty_ << " remaining " << p_book_result.remaining_
+                    << " vs " << p_shadow_result.remaining_;
       return false;
     }
     return true;
@@ -452,8 +452,8 @@ private:
     }
     for (std::size_t i = 0; i < trades_.size(); ++i)
     {
-      if (trades_[i].price != shadow_trades[i].price ||
-          trades_[i].quantity != shadow_trades[i].quantity)
+      if (trades_[i].price_ != shadow_trades[i].price_ ||
+          trades_[i].quantity_ != shadow_trades[i].quantity_)
       {
         ADD_FAILURE() << "step " << step_ << " trade " << i;
         return false;
@@ -464,10 +464,10 @@ private:
 
   [[nodiscard]] bool SameBook() const
   {
-    if (!SameLadder(LevelsAscending(book_, mex::Side::kBuy),
-                    shadow_.LevelsAscending(mex::Side::kBuy)) ||
-        !SameLadder(LevelsAscending(book_, mex::Side::kSell),
-                    shadow_.LevelsAscending(mex::Side::kSell)))
+    if (!SameLadder(LevelsAscending(book_, mex::Side::Buy),
+                    shadow_.LevelsAscending(mex::Side::Buy)) ||
+        !SameLadder(LevelsAscending(book_, mex::Side::Sell),
+                    shadow_.LevelsAscending(mex::Side::Sell)))
     {
       ADD_FAILURE() << "step " << step_;
       return false;
@@ -496,35 +496,35 @@ TEST(ExchangeSession, OpeningBookThenSweepAndCancel)
 
   for (std::int64_t price = 90; price <= 99; ++price)
   {
-    ASSERT_TRUE(session.Limit(mex::Side::kBuy, price, 5));
-    ASSERT_TRUE(session.Limit(mex::Side::kBuy, price, 3));
-    ASSERT_TRUE(session.Limit(mex::Side::kBuy, price, 1));
+    ASSERT_TRUE(session.Limit(mex::Side::Buy, price, 5));
+    ASSERT_TRUE(session.Limit(mex::Side::Buy, price, 3));
+    ASSERT_TRUE(session.Limit(mex::Side::Buy, price, 1));
   }
   for (std::int64_t price = 101; price <= 110; ++price)
   {
-    ASSERT_TRUE(session.Limit(mex::Side::kSell, price, 4));
-    ASSERT_TRUE(session.Limit(mex::Side::kSell, price, 6));
+    ASSERT_TRUE(session.Limit(mex::Side::Sell, price, 4));
+    ASSERT_TRUE(session.Limit(mex::Side::Sell, price, 6));
   }
 
   ASSERT_TRUE(session.CancelAt(1));
   ASSERT_TRUE(session.CancelAt(session.LiveCount() / 2));
   ASSERT_TRUE(session.CancelAt(session.LiveCount() - 1));
 
-  ASSERT_TRUE(session.Limit(mex::Side::kBuy, 105, 30));
-  ASSERT_TRUE(session.Market(mex::Side::kSell, 1000));
-  ASSERT_TRUE(session.Market(mex::Side::kBuy, 1000));
-  ASSERT_TRUE(session.Limit(mex::Side::kBuy, 100, 0));
-  ASSERT_TRUE(session.Market(mex::Side::kSell, 0));
+  ASSERT_TRUE(session.Limit(mex::Side::Buy, 105, 30));
+  ASSERT_TRUE(session.Market(mex::Side::Sell, 1000));
+  ASSERT_TRUE(session.Market(mex::Side::Buy, 1000));
+  ASSERT_TRUE(session.Limit(mex::Side::Buy, 100, 0));
+  ASSERT_TRUE(session.Market(mex::Side::Sell, 0));
   ASSERT_TRUE(session.CancelAll());
 }
 
 TEST(ExchangeSession, DropsRemainderWhenTheNewLevelCannotFit)
 {
   Session session(8, 1);
-  ASSERT_TRUE(session.Limit(mex::Side::kBuy, 90, 5));
-  ASSERT_TRUE(session.Limit(mex::Side::kSell, 100, 5));
-  ASSERT_TRUE(session.Limit(mex::Side::kBuy, 100, 12));
-  ASSERT_TRUE(session.Limit(mex::Side::kSell, 100, 4));
+  ASSERT_TRUE(session.Limit(mex::Side::Buy, 90, 5));
+  ASSERT_TRUE(session.Limit(mex::Side::Sell, 100, 5));
+  ASSERT_TRUE(session.Limit(mex::Side::Buy, 100, 12));
+  ASSERT_TRUE(session.Limit(mex::Side::Sell, 100, 4));
   ASSERT_TRUE(session.CancelAll());
 }
 
@@ -557,7 +557,7 @@ TEST(ExchangeSession, RandomFlowMatchesTheReferenceBook)
     {
       session.SetStep(step);
       const int roll = action(rng);
-      const mex::Side side = side_bit(rng) == 0 ? mex::Side::kBuy : mex::Side::kSell;
+      const mex::Side side = side_bit(rng) == 0 ? mex::Side::Buy : mex::Side::Sell;
       if (roll < 60)
       {
         ASSERT_TRUE(

@@ -14,9 +14,9 @@ Apply this to new and edited code. It overrides Google C++ Style. This rule is c
 | Local variables | snake_case | `order_id`, `price_level` |
 | Classes / structs / types | PascalCase | `OrderNode`, `PriceLevel`, `Book` |
 | Class data members | snake_case + trailing `_` | `order_id_` (required on every class member) |
-| Struct data members | snake_case, no `_` suffix | `order_id` (aggregate/POD fields only) |
+| Struct data members | snake_case + trailing `_` | `order_id_` (same as class members) |
 | Constants / `constexpr` | `k` + PascalCase | `kMaxOrders`, `kInvalid` |
-| Enumerators | `k` + PascalCase | `Side::kBuy` |
+| Enumerators | PascalCase, no `k` prefix | `Side::Buy`; **first** enumerator has an explicit `= 0` (or other) initializer |
 | Namespaces | lowercase, underscores if needed | `order_book` |
 | Template parameters | PascalCase | `TNode` |
 | Macros | avoid; if required, `ALL_CAPS` | `MAX_ORDERS` |
@@ -25,4 +25,4 @@ Apply this to new and edited code. It overrides Google C++ Style. This rule is c
 - **Indentation:** 2 spaces per level; no tabs. Match `.clang-format` (run `format` / `clang-format-check` CMake targets).
 - **Design:** composition over inheritance.
 - **Files:** lowercase with underscores or dashes; `.hpp` / `.cpp` to match existing files.
-- **Legacy names:** leave `INVALID` and `Side::Buy` / `Side::Sell` in `book.hpp` unless the user asks to rename them. New code uses `kInvalid`, `Side::kBuy`, `Side::kSell`.
+- **Constants** (`constexpr`, etc.) keep the `k` prefix (`kInvalidOrderId`). **Enumerators** do not.
