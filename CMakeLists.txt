@@ -6,16 +6,49 @@ endif()
 
 project(modern_exchng)
 
-set(CMAKE_CXX_STANDARD 26)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# CMake 3.28 does not enable GNU 16's C++26 dialect via CMAKE_CXX_STANDARD 26.
+# Pass -std=c++26 on the command line with contracts.
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# C++26 contracts (pre / post / contract_assert). Clang 22 does not parse them.
+# C++26 contracts (pre / post / contract_assert). Only GCC 16+ implements them.
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     message(FATAL_ERROR
-        "This project uses C++26 contracts (-fcontracts), which GCC implements and Clang does not.")
+        "Build only with GCC 16 or newer (C++26 contracts, -fcontracts). "
+        "${CMAKE_CXX_COMPILER_ID} is not supported.")
 endif()
-add_compile_options(-fcontracts)
+if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
+    message(FATAL_ERROR
+        "Build only with GCC 16 or newer (C++26 contracts, -fcontracts). "
+        "This compiler is GCC ${CMAKE_CXX_COMPILER_VERSION}.")
+endif()
+
+file(WRITE "${CMAKE_BINARY_DIR}/mex_check_contracts.cpp"
+"int Inc(int x)
+  pre(x >= 0)
+{
+  return x + 1;
+}
+int main()
+{
+  return Inc(0) == 1 ? 0 : 1;
+}
+")
+execute_process(
+    COMMAND "${CMAKE_CXX_COMPILER}" -std=c++26 -fcontracts
+            "${CMAKE_BINARY_DIR}/mex_check_contracts.cpp"
+            -o "${CMAKE_BINARY_DIR}/mex_check_contracts.bin"
+    RESULT_VARIABLE MEX_CONTRACTS_COMPILE_RESULT
+    OUTPUT_VARIABLE MEX_CONTRACTS_COMPILE_OUT
+    ERROR_VARIABLE MEX_CONTRACTS_COMPILE_ERR
+)
+if(NOT MEX_CONTRACTS_COMPILE_RESULT EQUAL 0)
+    message(FATAL_ERROR
+        "This GCC does not compile C++26 contracts with -fcontracts. "
+        "Use the latest GCC that supports contracts (16+).\n"
+        "${MEX_CONTRACTS_COMPILE_OUT}${MEX_CONTRACTS_COMPILE_ERR}")
+endif()
+
+add_compile_options(-std=c++26 -fcontracts)
 add_link_options(-fcontracts)
 
 add_library(mex STATIC src/book.cpp)
