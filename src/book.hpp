@@ -15,6 +15,10 @@ class PriceLadder
 public:
   PriceLadder() = default;
   explicit PriceLadder(std::uint32_t p_capacity);
+  PriceLadder(const PriceLadder &) = delete;
+  PriceLadder &operator=(const PriceLadder &) = delete;
+  PriceLadder(PriceLadder &&) = delete;
+  PriceLadder &operator=(PriceLadder &&) = delete;
 
   [[nodiscard]] bool empty() const;
   [[nodiscard]] std::size_t size() const;
@@ -52,13 +56,18 @@ private:
 // full pool are normal rejects, not failures.
 //
 // Fills from the last submit are in Fills() until the next submit. Matching
-// does not call into user code.
+// does not call into user code. A fill with maker_removed_ is a snapshot;
+// do not look that maker_id_ up on the book — Rest may have reused the slot.
 // clang-format off
 class Book
 {
 public:
   explicit Book(std::uint32_t p_max_orders, std::uint32_t p_max_price_levels)
     pre (p_max_orders > 0);
+  Book(const Book &) = delete;
+  Book &operator=(const Book &) = delete;
+  Book(Book &&) = delete;
+  Book &operator=(Book &&) = delete;
 
   [[nodiscard]] SubmitResult SubmitLimitOrder(Side p_side, Price p_price, const Quantity p_quantity)
     post (r: static_cast<std::uint64_t>(r.filled_qty_.units_) + r.remaining_.units_ == p_quantity.units_);

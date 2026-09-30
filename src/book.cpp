@@ -145,12 +145,12 @@ void ReleaseSlot(OrderNode *p_pool, std::uint32_t p_pool_size, OrderId *p_free_i
 }
 
 void RecordFill(Fill *p_fills, std::uint32_t p_capacity, std::uint32_t &p_count, OrderId p_maker_id,
-                Price p_price, Quantity p_quantity, bool p_maker_removed)
+                Price p_price, Quantity p_quantity, Side p_side, bool p_maker_removed)
 {
   contract_assert(p_fills != nullptr);
   contract_assert(p_count < p_capacity);
   contract_assert(p_quantity > Quantity{});
-  p_fills[p_count] = Fill{p_maker_id, p_price, p_quantity, p_maker_removed};
+  p_fills[p_count] = Fill{p_maker_id, p_price, p_quantity, p_side, p_maker_removed};
   ++p_count;
 }
 
@@ -172,7 +172,7 @@ void FillHead(OrderNode *p_pool, std::uint32_t p_pool_size, PriceLevel &p_level,
   p_level.total_qty_ -= fill_qty.units_;
   p_remaining -= fill_qty;
   RecordFill(p_fills, p_fills_capacity, p_fill_count, maker_id, p_level.price_, fill_qty,
-             maker.quantity_ == Quantity{});
+             maker.side_, maker.quantity_ == Quantity{});
 
   if (maker.quantity_ == Quantity{})
   {
@@ -261,6 +261,10 @@ Book::Book(std::uint32_t p_max_orders, std::uint32_t p_max_price_levels)
     : pool_(std::make_unique<OrderNode[]>(p_max_orders)), pool_size_(p_max_orders),
       free_ids_(std::make_unique<OrderId[]>(p_max_orders)), free_count_(p_max_orders),
       bids_(p_max_price_levels), asks_(p_max_price_levels), max_price_levels_(p_max_price_levels),
+      // One fill per distinct maker. Every maker is a resting order, so the
+      // buffer cannot exceed max_orders (tight: one market order can take
+      // every slot). The overflow check is a contract; bench_book ignores
+      // contracts, so this size is what keeps that path in bounds.
       fills_(std::make_unique<Fill[]>(p_max_orders)), fill_count_(0)
 {
   contract_assert(bids_.Capacity() == p_max_price_levels);
