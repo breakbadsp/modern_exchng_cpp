@@ -41,12 +41,14 @@ vs. sorted-vector debate for why this matters).
 ## Hard design guidelines (locked)
 
 1. Single-threaded, intentionally — simplicity over premature concurrency.
-2. **No heap allocation once the system is running.** Every container
-   (order pool, free list, bid/ask price-level vectors) is sized once at
-   construction. Exceeding a capacity at runtime is an **explicit
-   rejection**, never a silent grow.
+2. **No heap allocation once the system is running.** The order pool, free
+   stack, fill buffer, and bid/ask ladders are allocated once at
+   construction (`unique_ptr[]` / `PriceLadder`). Exceeding a capacity at
+   runtime is an **explicit rejection**, never a silent grow. `Book` is
+   neither copyable nor movable: capacity is fixed for the object's life,
+   and `Fills()` / `Bids()` spans would dangle across a move.
 3. Within that constraint, minimize data movement/churn where it's cheap
-   — but bounded O(n) `memmove` shifts in the price-level vectors were a
+   — but bounded O(n) `memmove` shifts in the price ladders were a
    **conscious, accepted trade-off** for simplicity, not eliminated (see
    "Price ladder vs. sorted vector" below).
 
@@ -94,7 +96,8 @@ Deliberately excluded, with reasoning:
   approaches ended up needing an up-front bound anyway) and still
   rejected in favor of keeping the simpler structure.
 
-**Chosen:** sorted `std::vector<PriceLevel>` per side.
+**Chosen:** a fixed-capacity `PriceLadder` per side (sorted `PriceLevel`
+array, size ≤ capacity, no reallocation after construct).
 
 - `PriceLevel`: `price` (`int64_t`), `head`/`tail` (pool indices),
   `order_count`, `total_qty` (O(1) liquidity check at a level without
@@ -102,8 +105,8 @@ Deliberately excluded, with reasoning:
 - **Storage order convention**: BIDS ascending (best bid =
   `bids_.back()`); ASKS descending (best ask = `asks_.back()`). Both
   sides keep their most active price at the tail on purpose —
-  `std::vector` insert/erase cost is proportional to *distance from
-  `.end()`*, not to nearest end — so concentrating the highest-churn
+  insert/erase cost is proportional to *distance from the end*, not to
+  nearest end — so concentrating the highest-churn
   region (top of book) at the tail makes the most frequent operations
   (new best-price levels, emptied best-price levels) cheap, while rarer
   activity deep in the book absorbs the full O(n) shift.
@@ -117,10 +120,15 @@ Deliberately excluded, with reasoning:
 - **Two distinct operations per incoming order, never conflated:**
   1. *Matching* — linear/sequential scan of the **opposite** side,
      consuming liquidity front-to-back. Must be sequential — price-time
-     priority means you can't skip levels. (Not yet implemented.)
+     priority means you can't skip levels. Fills are written into a
+     fixed buffer (`Fills()`), one record per distinct maker (so at most
+     `max_orders` fills). Matching does not invoke user code.
   2. *Resting insertion* — for any leftover quantity, a binary-search
      lookup into the **same** side's array. No consumption semantics,
-     so binary search applies cleanly (implemented).
+     so binary search applies cleanly. The free stack is LIFO: a maker
+     slot released during matching is the first id Rest reuses. If a
+     fill has `maker_removed_`, do not look `maker_id_` up on the book;
+     the fill's `side_` / `price_` / `quantity_` are the maker snapshot.
 - **Cancel**: `order_id` → O(1) → `pool_[order_id].price` → O(log n)
   binary search to relocate the order's *current* price-level position
   (it may have shifted since insertion) → O(1) unlink via `prev`/`next`.
@@ -130,31 +138,30 @@ Deliberately excluded, with reasoning:
 
 ## No-allocation implementation (locked)
 
-- `Book(max_orders, max_price_levels)` constructor: `pool_.resize(max_orders)`
-  (every slot exists up front); `free_list_` pre-populated with every
-  slot index; `bids_`/`asks_` both `.reserve(max_price_levels)`.
-- Acquiring an order slot is always `free_list_.pop_back()` — no
-  branching, no growth path exists anywhere in the code.
-- Both capacity checks (`free_list_.empty()`,
-  `levels.size() == max_price_levels_`) happen **before** any mutation,
-  so a rejected call leaves the book completely untouched.
-- Rejection returns a sentinel (`INVALID`), not an exception —
-  deliberate, since exception unwinding has unpredictable latency and
-  doesn't pair well with a no-allocation, latency-sensitive hot path.
+- `Book(max_orders, max_price_levels)` constructor: pool, free stack, and
+  fill buffer are `unique_ptr[]` of length `max_orders`; both ladders
+  allocate `max_price_levels` slots (or none if that cap is 0).
+- Acquiring an order slot is always a pop from the free stack — no
+  growth path exists anywhere in the matching path.
+- Capacity checks (`free_count_ == 0`, ladder size vs cap) decide
+  whether a remainder can rest. A reject **with no fills** leaves the
+  book untouched. A **partial fill that then cannot rest** keeps those
+  fills and drops the leftover quantity; that is accepted, not a
+  no-op reject.
+- Rejection is `SubmitStatus::Rejected` (or an accepted trade that does
+  not rest), not an exception.
 
 ## Deliverables so far
 
-- `order.hpp` — superseded by the `OrderNode` design in `book.hpp`
-  (kept as a record of the reasoning trail, not the current source of
-  truth).
-- `book.hpp` — current source of truth: `PriceLevel`, `OrderNode`,
-  `Book` with working `submit_limit_order` (insertion only, no matching
-  yet) and `cancel_order`.
+- `types.hpp` — `Price`, `Quantity`, `OrderNode`, `PriceLevel`, `Fill`,
+  `SubmitResult`.
+- `book.hpp` / `book.cpp` — `PriceLadder` and `Book`: limit and market
+  submit, cancel, matching, `Fills()` after each submit.
 
 ## Explicitly open / not yet decided
 
-- **Matching algorithm itself** — not designed. This is the deliberate
-  next step.
+- **Matching algorithm itself** — implemented for limit and market.
+  Policy details above `Book` (logging, alerts) are still open.
 - **Concrete `max_orders` / `max_price_levels` values** — currently just
   constructor parameters. Need sizing against the throughput target and
   the specific instrument's realistic order-flow depth and distinct
@@ -173,9 +180,9 @@ Deliberately excluded, with reasoning:
 - **Tick size / price scale** — `price` is `int64_t` ticks, but the
   concrete minimum increment (paise, cents, or otherwise) for the target
   instrument hasn't been pinned down.
-- **Input validation** — zero/negative quantity, invalid price, etc. —
-  not addressed; assumed to belong to a layer above `Book`, or simply
-  not yet designed.
+- **Input validation** — zero quantity is a normal reject. Negative
+  prices are allowed (integer ticks). Further policy (client-facing
+  checks) belongs above `Book`.
 - **Audit / arrival-order trail** — if a true arrival-order record
   independent of pool-slot reuse is ever needed (compliance, replay,
   debugging), that's a separate monotonic counter, not yet added.
@@ -183,5 +190,5 @@ Deliberately excluded, with reasoning:
 ## Where we are
 
 Steps: (1) Order representation — **done**. (2) Order book structure —
-**done** (insert + cancel; matching still pending). (3) Matching
-algorithm — **next**.
+**done**. (3) Matching — **done**. Next work is above `Book` (client ids,
+modify, multi-symbol).

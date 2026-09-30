@@ -80,7 +80,10 @@ mex::Book book(max_orders, max_price_levels);
 mex::SubmitResult r =
     book.SubmitLimitOrder(mex::Side::Buy, mex::Price{100}, mex::Quantity{10});
 // r.status_, r.filled_qty_, r.remaining_, r.order_id_
-// book.Fills() is the maker fills from this submit only
+// book.Fills() is the maker fills from this submit only.
+// If fill.maker_removed_ is true, do not call Order(fill.maker_id_):
+// matching freed that slot and Rest may reuse it in the same submit.
+// Use fill.side_, fill.price_, and fill.quantity_ instead.
 
 book.CancelOrder(r.order_id_);
 ```

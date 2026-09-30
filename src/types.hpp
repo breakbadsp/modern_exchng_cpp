@@ -81,11 +81,14 @@ struct SubmitResult
 };
 
 // One maker fill from the last SubmitLimitOrder / SubmitMarketOrder.
+// If maker_removed_ is true, maker_id_ names a slot that matching freed. Rest
+// may reuse that id in the same submit, so Order(maker_id_) is not the maker.
 struct Fill
 {
   OrderId maker_id_ = kInvalidOrderId;
   Price price_{};
   Quantity quantity_{};
+  Side side_ = Side::Buy;
   bool maker_removed_ = false;
 };
 

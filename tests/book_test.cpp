@@ -670,4 +670,51 @@ TEST(Matching, TakesMaxQuantityFromASmallerMaker)
   EXPECT_TRUE(book.Bids().empty());
 }
 
+TEST(Fills, RemovedMakerIdMayNameTheNewRestingOrder)
+{
+  mex::Book book(2, 2);
+  FillLog log;
+
+  const mex::SubmitResult maker = SubmitLimit(book, log, mex::Side::Sell, 100, 1);
+  const mex::SubmitResult taker = SubmitLimit(book, log, mex::Side::Buy, 100, 3);
+  ExpectTrade(taker, 1, 2, true);
+  ASSERT_EQ(book.Fills().size(), std::size_t{1});
+  const mex::Fill fill = book.Fills()[0];
+  EXPECT_EQ(fill.maker_id_, maker.order_id_);
+  EXPECT_TRUE(fill.maker_removed_);
+  EXPECT_EQ(fill.side_, mex::Side::Sell);
+  EXPECT_EQ(taker.order_id_, maker.order_id_);
+  EXPECT_EQ(book.Order(fill.maker_id_).side_, mex::Side::Buy);
+  EXPECT_EQ(book.Order(fill.maker_id_).quantity_, mex::Quantity{2});
+  ExpectBookInvariants(book);
+}
+
+TEST(Fills, OneMarketOrderCanFillEveryRestingSlot)
+{
+  constexpr std::uint32_t kOrders = 64;
+  mex::Book book(kOrders, 1);
+  FillLog log;
+
+  for (std::uint32_t i = 0; i < kOrders; ++i)
+  {
+    ExpectResting(SubmitLimit(book, log, mex::Side::Sell, 100, 1), 1);
+  }
+  EXPECT_EQ(book.FreeSlotCount(), 0u);
+
+  log.Clear();
+  const mex::SubmitResult taker = SubmitMarket(book, log, mex::Side::Buy, kOrders);
+  ExpectTrade(taker, kOrders, 0, false);
+  ASSERT_EQ(book.Fills().size(), std::size_t{kOrders});
+  EXPECT_EQ(log.Records().size(), std::size_t{kOrders});
+  for (const mex::Fill &fill : book.Fills())
+  {
+    EXPECT_TRUE(fill.maker_removed_);
+    EXPECT_EQ(fill.side_, mex::Side::Sell);
+    EXPECT_EQ(fill.quantity_, mex::Quantity{1});
+  }
+  ExpectBookInvariants(book);
+  EXPECT_TRUE(book.Asks().empty());
+  EXPECT_EQ(book.FreeSlotCount(), kOrders);
+}
+
 } // namespace
