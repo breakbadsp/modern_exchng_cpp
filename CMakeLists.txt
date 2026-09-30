@@ -51,6 +51,24 @@ endif()
 add_compile_options(-std=c++26 -fcontracts)
 add_link_options(-fcontracts)
 
+option(MEX_ENABLE_ASAN "Compile and link with AddressSanitizer" OFF)
+option(MEX_ENABLE_UBSAN "Compile and link with UndefinedBehaviorSanitizer" OFF)
+
+set(MEX_SANITIZER_LIST "")
+if(MEX_ENABLE_ASAN)
+    list(APPEND MEX_SANITIZER_LIST address)
+    add_compile_options(-fno-omit-frame-pointer)
+endif()
+if(MEX_ENABLE_UBSAN)
+    list(APPEND MEX_SANITIZER_LIST undefined)
+    add_compile_options(-fno-sanitize-recover=undefined)
+endif()
+if(MEX_SANITIZER_LIST)
+    list(JOIN MEX_SANITIZER_LIST "," MEX_SANITIZER_CSV)
+    add_compile_options(-fsanitize=${MEX_SANITIZER_CSV})
+    add_link_options(-fsanitize=${MEX_SANITIZER_CSV})
+endif()
+
 add_library(mex STATIC src/book.cpp)
 target_include_directories(mex PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
