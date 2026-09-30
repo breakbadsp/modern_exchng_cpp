@@ -28,7 +28,17 @@ cmake --build --preset ninja
 ctest --preset ninja --output-on-failure
 ```
 
-Binaries land in `build/`: static library `libmex.a`, tests `test_book`, benchmark `bench_book`.
+AddressSanitizer and UndefinedBehaviorSanitizer (together):
+
+```bash
+cmake --preset ninja-asan-ubsan
+cmake --build --preset ninja-asan-ubsan
+ctest --preset ninja-asan-ubsan --output-on-failure
+```
+
+Or pass `-DMEX_ENABLE_ASAN=ON` and/or `-DMEX_ENABLE_UBSAN=ON` to a Ninja configure.
+
+Binaries land in `build/` (or `build-asan-ubsan/`): static library `libmex.a`, tests `test_book`, benchmark `bench_book`.
 
 Configure fails if CMake is not using Ninja (`-G Ninja` or the preset above), if the compiler is not GCC 16+, or if `-fcontracts` does not compile.
 

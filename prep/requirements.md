@@ -3,7 +3,8 @@
 ## Environment / Toolchain
 
 - C++26, GCC 16+ (`-fcontracts`). Configure fails on older GCC, on
-Clang, or if `-fcontracts` does not compile.
+Clang, or if `-fcontracts` does not compile. Optional ASan/UBSan via
+`MEX_ENABLE_ASAN` / `MEX_ENABLE_UBSAN` (preset `ninja-asan-ubsan`)
 - Arch Linux (Omarchy), all latest versions
 - Reflection stays unused; it is still GCC-only and not needed here
 
