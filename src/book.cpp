@@ -15,11 +15,11 @@ namespace
 [[nodiscard]] bool Ascending(Side p_side) { return p_side == Side::Buy; }
 
 // Bids are stored low to high, asks high to low, so the best price is always back().
-[[nodiscard]] std::size_t FindLevel(const std::vector<PriceLevel> &p_levels, std::int64_t p_price,
+[[nodiscard]] std::size_t FindLevel(const std::vector<PriceLevel> &p_levels, Price p_price,
                                     bool p_ascending)
 {
   const auto it = std::lower_bound(p_levels.begin(), p_levels.end(), p_price,
-                                   [p_ascending](PriceLevel p_level, std::int64_t p_key)
+                                   [p_ascending](PriceLevel p_level, Price p_key)
                                    {
                                      if (p_ascending)
                                      {
@@ -30,7 +30,7 @@ namespace
   return static_cast<std::size_t>(it - p_levels.begin());
 }
 
-[[nodiscard]] bool Crosses(Side p_aggressor, std::int64_t p_limit_price, std::int64_t p_maker_price)
+[[nodiscard]] bool Crosses(Side p_aggressor, Price p_limit_price, Price p_maker_price)
 {
   if (p_aggressor == Side::Buy)
   {
@@ -39,8 +39,7 @@ namespace
   return p_limit_price <= p_maker_price;
 }
 
-[[nodiscard]] SubmitResult Accepted(std::uint32_t p_filled_qty, std::uint32_t p_remaining,
-                                    OrderId p_order_id)
+[[nodiscard]] SubmitResult Accepted(Quantity p_filled_qty, Quantity p_remaining, OrderId p_order_id)
 {
   SubmitResult result;
   result.status_ = SubmitStatus::Accepted;
@@ -50,11 +49,11 @@ namespace
   return result;
 }
 
-[[nodiscard]] SubmitResult Rejected(std::uint32_t p_remaining)
+[[nodiscard]] SubmitResult Rejected(Quantity p_remaining)
 {
   SubmitResult result;
   result.status_ = SubmitStatus::Rejected;
-  result.filled_qty_ = 0;
+  result.filled_qty_ = Quantity{};
   result.remaining_ = p_remaining;
   result.order_id_ = kInvalidOrderId;
   return result;
@@ -70,19 +69,19 @@ Book::Book(std::uint32_t p_max_orders, std::uint32_t p_max_price_levels)
   asks_.reserve(p_max_price_levels);
 }
 
-SubmitResult Book::SubmitLimit(Side p_side, std::int64_t p_price, std::uint32_t p_quantity,
+SubmitResult Book::SubmitLimit(Side p_side, Price p_price, Quantity p_quantity,
                                FillCallback p_on_fill, void *p_context)
 {
-  if (p_quantity == 0)
+  if (p_quantity == Quantity{})
   {
-    return Rejected(0);
+    return Rejected(Quantity{});
   }
 
-  const std::uint32_t filled = Match(p_side, p_price, p_quantity, p_on_fill, p_context);
-  const std::uint32_t remaining = p_quantity - filled;
-  if (remaining == 0)
+  const Quantity filled = Match(p_side, p_price, p_quantity, p_on_fill, p_context);
+  const Quantity remaining = p_quantity - filled;
+  if (remaining == Quantity{})
   {
-    return Accepted(filled, 0, kInvalidOrderId);
+    return Accepted(filled, Quantity{}, kInvalidOrderId);
   }
 
   // Matching runs first because a fill can free the slot or the level this
@@ -90,7 +89,7 @@ SubmitResult Book::SubmitLimit(Side p_side, std::int64_t p_price, std::uint32_t 
   // A partial fill that then cannot rest keeps the fills and drops the rest.
   if (!CanRest(p_side, p_price))
   {
-    if (filled == 0)
+    if (filled == Quantity{})
     {
       return Rejected(p_quantity);
     }
@@ -101,22 +100,22 @@ SubmitResult Book::SubmitLimit(Side p_side, std::int64_t p_price, std::uint32_t 
   return Accepted(filled, remaining, order_id);
 }
 
-SubmitResult Book::SubmitMarket(Side p_side, std::uint32_t p_quantity, FillCallback p_on_fill,
+SubmitResult Book::SubmitMarket(Side p_side, Quantity p_quantity, FillCallback p_on_fill,
                                 void *p_context)
 {
-  if (p_quantity == 0)
+  if (p_quantity == Quantity{})
   {
-    return Rejected(0);
+    return Rejected(Quantity{});
   }
 
-  const std::uint32_t filled = Match(p_side, std::nullopt, p_quantity, p_on_fill, p_context);
-  if (filled == 0)
+  const Quantity filled = Match(p_side, std::nullopt, p_quantity, p_on_fill, p_context);
+  if (filled == Quantity{})
   {
-    return Rejected(0);
+    return Rejected(Quantity{});
   }
 
   // A market order never rests. Unfilled quantity is cancelled.
-  return Accepted(filled, 0, kInvalidOrderId);
+  return Accepted(filled, Quantity{}, kInvalidOrderId);
 }
 
 bool Book::CancelOrder(const OrderId p_order_id)
@@ -127,7 +126,7 @@ bool Book::CancelOrder(const OrderId p_order_id)
   }
 
   OrderNode &node = pool_[p_order_id];
-  if (node.quantity_ == 0)
+  if (node.quantity_ == Quantity{})
   {
     return false;
   }
@@ -136,9 +135,9 @@ bool Book::CancelOrder(const OrderId p_order_id)
   const std::size_t index = FindLevel(levels, node.price_, Ascending(node.side_));
   contract_assert(index < levels.size() && levels[index].price_ == node.price_);
   PriceLevel &level = levels[index];
-  contract_assert(level.total_qty_ >= node.quantity_ && level.order_count_ > 0);
+  contract_assert(level.total_qty_ >= node.quantity_.units_ && level.order_count_ > 0);
   Unlink(level, p_order_id);
-  level.total_qty_ -= node.quantity_;
+  level.total_qty_ -= node.quantity_.units_;
   --level.order_count_;
   Release(p_order_id);
 
@@ -159,13 +158,13 @@ std::uint32_t Book::FreeSlotCount() const { return static_cast<std::uint32_t>(fr
 
 std::uint32_t Book::MaxOrders() const { return static_cast<std::uint32_t>(pool_.size()); }
 
-std::uint32_t Book::Match(Side p_aggressor, std::optional<std::int64_t> p_limit_price,
-                          std::uint32_t p_quantity, FillCallback p_on_fill, void *p_context)
+Quantity Book::Match(Side p_aggressor, std::optional<Price> p_limit_price, Quantity p_quantity,
+                     FillCallback p_on_fill, void *p_context)
 {
-  std::uint32_t remaining = p_quantity;
+  Quantity remaining = p_quantity;
   std::vector<PriceLevel> &levels = Levels(p_aggressor == Side::Buy ? Side::Sell : Side::Buy);
 
-  while (remaining > 0 && !levels.empty())
+  while (remaining > Quantity{} && !levels.empty())
   {
     PriceLevel &level = levels.back();
     if (p_limit_price.has_value() && !Crosses(p_aggressor, *p_limit_price, level.price_))
@@ -173,20 +172,20 @@ std::uint32_t Book::Match(Side p_aggressor, std::optional<std::int64_t> p_limit_
       break;
     }
 
-    while (remaining > 0 && level.head_ != kInvalidOrderId)
+    while (remaining > Quantity{} && level.head_ != kInvalidOrderId)
     {
       const OrderId maker_id = level.head_;
       contract_assert(maker_id < pool_.size());
       OrderNode &maker = pool_[maker_id];
-      contract_assert(maker.quantity_ > 0 && level.total_qty_ >= maker.quantity_);
-      const std::uint32_t fill_qty = remaining < maker.quantity_ ? remaining : maker.quantity_;
+      contract_assert(maker.quantity_ > Quantity{} && level.total_qty_ >= maker.quantity_.units_);
+      const Quantity fill_qty = remaining < maker.quantity_ ? remaining : maker.quantity_;
 
       maker.quantity_ -= fill_qty;
-      level.total_qty_ -= fill_qty;
+      level.total_qty_ -= fill_qty.units_;
       remaining -= fill_qty;
       p_on_fill(maker_id, level.price_, fill_qty, p_context);
 
-      if (maker.quantity_ == 0)
+      if (maker.quantity_ == Quantity{})
       {
         Unlink(level, maker_id);
         --level.order_count_;
@@ -204,7 +203,7 @@ std::uint32_t Book::Match(Side p_aggressor, std::optional<std::int64_t> p_limit_
   return p_quantity - remaining;
 }
 
-bool Book::CanRest(Side p_side, std::int64_t p_price) const
+bool Book::CanRest(Side p_side, Price p_price) const
 {
   if (free_list_.empty())
   {
@@ -221,7 +220,7 @@ bool Book::CanRest(Side p_side, std::int64_t p_price) const
   return levels.size() < static_cast<std::size_t>(max_price_levels_);
 }
 
-OrderId Book::Rest(Side p_side, std::int64_t p_price, std::uint32_t p_quantity)
+OrderId Book::Rest(Side p_side, Price p_price, Quantity p_quantity)
 {
   const OrderId order_id = free_list_.back();
   free_list_.pop_back();
@@ -250,7 +249,7 @@ OrderId Book::Rest(Side p_side, std::int64_t p_price, std::uint32_t p_quantity)
     }
     level.tail_ = order_id;
     ++level.order_count_;
-    level.total_qty_ += p_quantity;
+    level.total_qty_ += p_quantity.units_;
     return order_id;
   }
 
@@ -262,7 +261,7 @@ OrderId Book::Rest(Side p_side, std::int64_t p_price, std::uint32_t p_quantity)
   level.head_ = order_id;
   level.tail_ = order_id;
   level.order_count_ = 1;
-  level.total_qty_ = p_quantity;
+  level.total_qty_ = p_quantity.units_;
   levels.insert(levels.begin() + static_cast<std::ptrdiff_t>(index), level);
   return order_id;
 }
@@ -292,7 +291,7 @@ void Book::Unlink(PriceLevel &p_level, OrderId p_order_id)
 void Book::Release(OrderId p_order_id)
 {
   OrderNode &node = pool_[p_order_id];
-  node.quantity_ = 0;
+  node.quantity_ = Quantity{};
   node.prev_ = kInvalidOrderId;
   node.next_ = kInvalidOrderId;
   free_list_.push_back(p_order_id);

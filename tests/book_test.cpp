@@ -43,17 +43,17 @@ TEST(Resting, DoesNotTradeInsideTheSpread)
   EXPECT_TRUE(log.Records().empty());
   ExpectBookInvariants(book);
   EXPECT_EQ(book.Asks().size(), std::size_t{1});
-  EXPECT_EQ(book.Asks().back().price_, 100);
+  EXPECT_EQ(book.Asks().back().price_, mex::Price{100});
   EXPECT_TRUE(book.Bids().empty());
   EXPECT_EQ(book.Order(ask.order_id_).side_, mex::Side::Sell);
-  EXPECT_EQ(book.Order(ask.order_id_).quantity_, 10u);
+  EXPECT_EQ(book.Order(ask.order_id_).quantity_, mex::Quantity{10});
 
   const mex::SubmitResult bid = SubmitLimit(book, log, mex::Side::Buy, 99, 5);
   ExpectResting(bid, 5);
   EXPECT_TRUE(log.Records().empty());
   ExpectBookInvariants(book);
-  EXPECT_EQ(book.Bids().back().price_, 99);
-  EXPECT_EQ(book.Asks().back().price_, 100);
+  EXPECT_EQ(book.Bids().back().price_, mex::Price{99});
+  EXPECT_EQ(book.Asks().back().price_, mex::Price{100});
   EXPECT_EQ(book.FreeSlotCount(), 2u);
 }
 
@@ -67,18 +67,18 @@ TEST(Resting, InsertsPricesInBookOrderOnBothSides)
   ExpectResting(SubmitLimit(book, log, mex::Side::Buy, 95, 1), 1);
   ExpectBookInvariants(book);
   ASSERT_EQ(book.Bids().size(), std::size_t{3});
-  EXPECT_EQ(book.Bids()[0].price_, 90);
-  EXPECT_EQ(book.Bids()[1].price_, 95);
-  EXPECT_EQ(book.Bids()[2].price_, 100);
+  EXPECT_EQ(book.Bids()[0].price_, mex::Price{90});
+  EXPECT_EQ(book.Bids()[1].price_, mex::Price{95});
+  EXPECT_EQ(book.Bids()[2].price_, mex::Price{100});
 
   ExpectResting(SubmitLimit(book, log, mex::Side::Sell, 110, 1), 1);
   ExpectResting(SubmitLimit(book, log, mex::Side::Sell, 130, 1), 1);
   ExpectResting(SubmitLimit(book, log, mex::Side::Sell, 120, 1), 1);
   ExpectBookInvariants(book);
   ASSERT_EQ(book.Asks().size(), std::size_t{3});
-  EXPECT_EQ(book.Asks()[0].price_, 130);
-  EXPECT_EQ(book.Asks()[1].price_, 120);
-  EXPECT_EQ(book.Asks()[2].price_, 110);
+  EXPECT_EQ(book.Asks()[0].price_, mex::Price{130});
+  EXPECT_EQ(book.Asks()[1].price_, mex::Price{120});
+  EXPECT_EQ(book.Asks()[2].price_, mex::Price{110});
   EXPECT_TRUE(log.Records().empty());
 }
 
@@ -140,7 +140,7 @@ TEST(Matching, PartiallyFillsOneMakerAndRestsTheRest)
   ExpectBookInvariants(book);
   EXPECT_TRUE(book.Asks().empty());
   ASSERT_EQ(book.Bids().size(), std::size_t{1});
-  EXPECT_EQ(book.Bids().back().price_, 100);
+  EXPECT_EQ(book.Bids().back().price_, mex::Price{100});
   EXPECT_EQ(book.Bids().back().total_qty_, 5u);
   EXPECT_EQ(book.Bids().back().head_, taker.order_id_);
 }
@@ -176,8 +176,8 @@ TEST(Matching, LeavesAPartiallyFilledMakerAtTheHead)
   ExpectBookInvariants(book);
   EXPECT_EQ(book.Asks().back().head_, first.order_id_);
   EXPECT_EQ(book.Asks().back().tail_, second.order_id_);
-  EXPECT_EQ(book.Order(first.order_id_).quantity_, 2u);
-  EXPECT_EQ(book.Order(second.order_id_).quantity_, 7u);
+  EXPECT_EQ(book.Order(first.order_id_).quantity_, mex::Quantity{2});
+  EXPECT_EQ(book.Order(second.order_id_).quantity_, mex::Quantity{7});
   EXPECT_EQ(book.Asks().back().total_qty_, 9u);
 }
 
@@ -196,9 +196,9 @@ TEST(Matching, WalksAskLevelsAndStopsAtTheLimit)
   ExpectFill(log.Records()[1], ask99.order_id_, 99, 40);
   ExpectBookInvariants(book);
   ASSERT_EQ(book.Asks().size(), std::size_t{1});
-  EXPECT_EQ(book.Asks().back().price_, 101);
+  EXPECT_EQ(book.Asks().back().price_, mex::Price{101});
   EXPECT_EQ(book.Asks().back().head_, ask101.order_id_);
-  EXPECT_EQ(book.Bids().back().price_, 100);
+  EXPECT_EQ(book.Bids().back().price_, mex::Price{100});
   EXPECT_EQ(book.Bids().back().total_qty_, 30u);
 }
 
@@ -216,9 +216,9 @@ TEST(Matching, SellsIntoBidsFromBestPriceDown)
   ExpectFill(log.Records()[1], bid99.order_id_, 99, 5);
   ExpectBookInvariants(book);
   ASSERT_EQ(book.Bids().size(), std::size_t{1});
-  EXPECT_EQ(book.Bids().back().price_, 99);
+  EXPECT_EQ(book.Bids().back().price_, mex::Price{99});
   EXPECT_EQ(book.Bids().back().total_qty_, 5u);
-  EXPECT_EQ(book.Order(bid99.order_id_).quantity_, 5u);
+  EXPECT_EQ(book.Order(bid99.order_id_).quantity_, mex::Quantity{5});
 }
 
 TEST(Matching, FillsSamePriceInFifoOrder)
@@ -252,10 +252,10 @@ TEST(Matching, ExhaustsOneLevelBeforeTheNextOrderAtThatPrice)
   ExpectFill(log.Records()[1], second.order_id_, 100, 3);
   ExpectBookInvariants(book);
   ASSERT_EQ(book.Asks().size(), std::size_t{2});
-  EXPECT_EQ(book.Asks().back().price_, 100);
+  EXPECT_EQ(book.Asks().back().price_, mex::Price{100});
   EXPECT_EQ(book.Asks().back().head_, second.order_id_);
-  EXPECT_EQ(book.Order(second.order_id_).quantity_, 3u);
-  EXPECT_EQ(book.Order(worse.order_id_).quantity_, 9u);
+  EXPECT_EQ(book.Order(second.order_id_).quantity_, mex::Quantity{3});
+  EXPECT_EQ(book.Order(worse.order_id_).quantity_, mex::Quantity{9});
 }
 
 TEST(Matching, RestsWhatIsLeftAfterTheOppositeSideIsGone)
@@ -269,7 +269,7 @@ TEST(Matching, RestsWhatIsLeftAfterTheOppositeSideIsGone)
   ExpectTrade(taker, 20, 10, true);
   ExpectBookInvariants(book);
   EXPECT_TRUE(book.Asks().empty());
-  EXPECT_EQ(book.Bids().back().price_, 100);
+  EXPECT_EQ(book.Bids().back().price_, mex::Price{100});
   EXPECT_EQ(book.Bids().back().total_qty_, 10u);
 }
 
@@ -426,7 +426,7 @@ TEST(Cancel, RemovesHeadOrTailWithoutDisturbingTheOtherOrders)
   EXPECT_EQ(book.Bids().back().head_, mid.order_id_);
   EXPECT_EQ(book.Bids().back().tail_, mid.order_id_);
   EXPECT_EQ(book.Order(mid.order_id_).prev_, mex::kInvalidOrderId);
-  EXPECT_EQ(book.Order(mid.order_id_).quantity_, 1u);
+  EXPECT_EQ(book.Order(mid.order_id_).quantity_, mex::Quantity{1});
 }
 
 TEST(Cancel, FindsALevelAfterLaterInsertsMoveIt)
@@ -436,21 +436,21 @@ TEST(Cancel, FindsALevelAfterLaterInsertsMoveIt)
 
   const mex::SubmitResult deep_bid = SubmitLimit(book, log, mex::Side::Buy, 100, 7);
   ExpectResting(SubmitLimit(book, log, mex::Side::Buy, 90, 4), 4);
-  EXPECT_EQ(book.Bids().front().price_, 90);
-  EXPECT_EQ(book.Bids().back().price_, 100);
+  EXPECT_EQ(book.Bids().front().price_, mex::Price{90});
+  EXPECT_EQ(book.Bids().back().price_, mex::Price{100});
   EXPECT_TRUE(book.CancelOrder(deep_bid.order_id_));
   ExpectBookInvariants(book);
   ASSERT_EQ(book.Bids().size(), std::size_t{1});
-  EXPECT_EQ(book.Bids().back().price_, 90);
+  EXPECT_EQ(book.Bids().back().price_, mex::Price{90});
   EXPECT_EQ(book.Bids().back().total_qty_, 4u);
 
   const mex::SubmitResult deep_ask = SubmitLimit(book, log, mex::Side::Sell, 110, 3);
   ExpectResting(SubmitLimit(book, log, mex::Side::Sell, 120, 3), 3);
-  EXPECT_EQ(book.Asks().back().price_, 110);
+  EXPECT_EQ(book.Asks().back().price_, mex::Price{110});
   EXPECT_TRUE(book.CancelOrder(deep_ask.order_id_));
   ExpectBookInvariants(book);
   ASSERT_EQ(book.Asks().size(), std::size_t{1});
-  EXPECT_EQ(book.Asks().back().price_, 120);
+  EXPECT_EQ(book.Asks().back().price_, mex::Price{120});
 }
 
 TEST(Cancel, ReusesTheFreedSlotForTheNextOrder)
@@ -466,8 +466,8 @@ TEST(Cancel, ReusesTheFreedSlotForTheNextOrder)
   const mex::SubmitResult reused = SubmitLimit(book, log, mex::Side::Sell, 105, 2);
   ExpectResting(reused, 2);
   EXPECT_EQ(reused.order_id_, first.order_id_);
-  EXPECT_EQ(book.Order(reused.order_id_).price_, 105);
-  EXPECT_EQ(book.Order(reused.order_id_).quantity_, 2u);
+  EXPECT_EQ(book.Order(reused.order_id_).price_, mex::Price{105});
+  EXPECT_EQ(book.Order(reused.order_id_).quantity_, mex::Quantity{2});
   EXPECT_EQ(book.Asks().back().head_, reused.order_id_);
   ExpectBookInvariants(book);
 
@@ -490,8 +490,8 @@ TEST(Capacity, FullyFilledTakerDoesNotNeedAFreeSlot)
   ExpectTrade(taker, 5, 0, false);
   EXPECT_EQ(book.FreeSlotCount(), 0u);
   ExpectBookInvariants(book);
-  EXPECT_EQ(book.Order(maker.order_id_).quantity_, 5u);
-  EXPECT_EQ(book.Asks().back().price_, 100);
+  EXPECT_EQ(book.Order(maker.order_id_).quantity_, mex::Quantity{5});
+  EXPECT_EQ(book.Asks().back().price_, mex::Price{100});
 }
 
 TEST(Capacity, RejectsARestThatDoesNotTradeWhenThePoolIsFull)
@@ -555,7 +555,7 @@ TEST(Capacity, RejectsANewLevelAtTheCapAndStillMatches)
   ExpectFill(log.Records()[0], best_bid.order_id_, 95, 5);
   ExpectBookInvariants(book);
   ASSERT_EQ(book.Bids().size(), std::size_t{1});
-  EXPECT_EQ(book.Bids().back().price_, 90);
+  EXPECT_EQ(book.Bids().back().price_, mex::Price{90});
 }
 
 TEST(Capacity, JoinsAnExistingLevelWhenNoNewLevelFits)
@@ -598,7 +598,7 @@ TEST(Capacity, DropsTheUnrestedRemainderWhenTheNewLevelDoesNotFit)
   ExpectBookInvariants(book);
   EXPECT_TRUE(book.Asks().empty());
   ASSERT_EQ(book.Bids().size(), std::size_t{1});
-  EXPECT_EQ(book.Bids().back().price_, 90);
+  EXPECT_EQ(book.Bids().back().price_, mex::Price{90});
   EXPECT_EQ(book.Bids().back().head_, resting_bid.order_id_);
   EXPECT_EQ(book.Bids().back().total_qty_, 5u);
 }
@@ -619,8 +619,8 @@ TEST(Scenario, MixedOrdersKeepTheBookConsistent)
   const mex::SubmitResult buy = SubmitLimit(book, log, mex::Side::Buy, 12, 3);
   ExpectTrade(buy, 3, 0, false);
   ExpectBookInvariants(book);
-  EXPECT_EQ(book.Order(ask_b.order_id_).quantity_, 1u);
-  EXPECT_EQ(book.Order(bid.order_id_).quantity_, 5u);
+  EXPECT_EQ(book.Order(ask_b.order_id_).quantity_, mex::Quantity{1});
+  EXPECT_EQ(book.Order(bid.order_id_).quantity_, mex::Quantity{5});
 
   log.Clear();
   const mex::SubmitResult market = SubmitMarket(book, log, mex::Side::Sell, 9);

@@ -7,7 +7,7 @@ Single-symbol limit order book with price-time (FIFO) matching. One `mex::Book` 
 - **Limit and market** orders, partial fills, cancel by internal order id (pool index)
 - **Fixed capacity** at construction (`max_orders`, `max_price_levels`); full pool or ladder rejects instead of growing
 - **Single-threaded**, no heap allocation on the hot path after setup
-- Prices are **integer ticks** (`int64_t`); quantities are `uint32_t`
+- Prices are **integer ticks** (`mex::Price`); order sizes are `mex::Quantity` (`uint32_t` units). Level totals stay `uint64_t`.
 
 Design background and locked decisions: [`prep/design-spec.md`](prep/design-spec.md). C++ style: [`docs/naming-conventions.md`](docs/naming-conventions.md) (2-space indent, Allman braces; enforced by [`.clang-format`](.clang-format)).
 
@@ -77,11 +77,12 @@ docs/         naming and C++ standards reference
 
 mex::Book book(max_orders, max_price_levels);
 
-auto on_fill = [](mex::OrderId p_maker_id, std::int64_t p_price, std::uint32_t p_qty) {
+auto on_fill = [](mex::OrderId p_maker_id, mex::Price p_price, mex::Quantity p_qty) {
     // record trade
 };
 
-mex::SubmitResult r = book.SubmitLimitOrder(mex::Side::Buy, 100, 10, on_fill);
+mex::SubmitResult r =
+    book.SubmitLimitOrder(mex::Side::Buy, mex::Price{100}, mex::Quantity{10}, on_fill);
 // r.status_, r.filled_qty_, r.remaining_, r.order_id_
 
 book.CancelOrder(r.order_id);

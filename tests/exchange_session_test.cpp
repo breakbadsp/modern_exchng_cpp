@@ -17,14 +17,14 @@ using book_test::ExpectBookInvariants;
 
 struct Trade
 {
-  std::int64_t price_ = 0;
-  std::uint32_t quantity_ = 0;
+  mex::Price price_{};
+  mex::Quantity quantity_{};
 };
 
 struct LevelSnap
 {
-  std::int64_t price_ = 0;
-  std::vector<std::uint32_t> quantities_;
+  mex::Price price_{};
+  std::vector<mex::Quantity> quantities_;
 };
 
 // Independent price-time book. It uses maps and deques, not the pool, so agreement
@@ -38,24 +38,24 @@ public:
   {
   }
 
-  [[nodiscard]] mex::SubmitResult SubmitLimit(mex::Side p_side, std::int64_t p_price,
-                                              std::uint32_t p_quantity)
+  [[nodiscard]] mex::SubmitResult SubmitLimit(mex::Side p_side, mex::Price p_price,
+                                              mex::Quantity p_quantity)
   {
     trades_.clear();
-    if (p_quantity == 0)
+    if (p_quantity == mex::Quantity{})
     {
-      return Rejected(0);
+      return Rejected(mex::Quantity{});
     }
 
-    const std::uint32_t filled = Match(p_side, p_price, p_quantity);
-    const std::uint32_t remaining = p_quantity - filled;
-    if (remaining == 0)
+    const mex::Quantity filled = Match(p_side, p_price, p_quantity);
+    const mex::Quantity remaining = p_quantity - filled;
+    if (remaining == mex::Quantity{})
     {
-      return Accepted(filled, 0, mex::kInvalidOrderId);
+      return Accepted(filled, mex::Quantity{}, mex::kInvalidOrderId);
     }
     if (!CanRest(p_side, p_price))
     {
-      if (filled == 0)
+      if (filled == mex::Quantity{})
       {
         return Rejected(p_quantity);
       }
@@ -66,20 +66,20 @@ public:
     return Accepted(filled, remaining, order_id);
   }
 
-  [[nodiscard]] mex::SubmitResult SubmitMarket(mex::Side p_side, std::uint32_t p_quantity)
+  [[nodiscard]] mex::SubmitResult SubmitMarket(mex::Side p_side, mex::Quantity p_quantity)
   {
     trades_.clear();
-    if (p_quantity == 0)
+    if (p_quantity == mex::Quantity{})
     {
-      return Rejected(0);
+      return Rejected(mex::Quantity{});
     }
 
-    const std::uint32_t filled = Match(p_side, std::nullopt, p_quantity);
-    if (filled == 0)
+    const mex::Quantity filled = Match(p_side, std::nullopt, p_quantity);
+    if (filled == mex::Quantity{})
     {
-      return Rejected(0);
+      return Rejected(mex::Quantity{});
     }
-    return Accepted(filled, 0, mex::kInvalidOrderId);
+    return Accepted(filled, mex::Quantity{}, mex::kInvalidOrderId);
   }
 
   [[nodiscard]] bool Cancel(mex::OrderId p_order_id)
@@ -101,7 +101,7 @@ public:
       levels.erase(level);
     }
     order.live_ = false;
-    order.quantity_ = 0;
+    order.quantity_ = mex::Quantity{};
     ++free_slots_;
     return true;
   }
@@ -134,13 +134,13 @@ private:
   {
     bool live_ = false;
     mex::Side side_ = mex::Side::Buy;
-    std::int64_t price_ = 0;
-    std::uint32_t quantity_ = 0;
+    mex::Price price_{};
+    mex::Quantity quantity_{};
   };
 
   using Queue = std::deque<mex::OrderId>;
 
-  [[nodiscard]] std::map<std::int64_t, Queue> &Levels(mex::Side p_side)
+  [[nodiscard]] std::map<mex::Price, Queue> &Levels(mex::Side p_side)
   {
     if (p_side == mex::Side::Buy)
     {
@@ -149,7 +149,7 @@ private:
     return asks_;
   }
 
-  [[nodiscard]] bool CanRest(mex::Side p_side, std::int64_t p_price) const
+  [[nodiscard]] bool CanRest(mex::Side p_side, mex::Price p_price) const
   {
     if (free_slots_ == 0)
     {
@@ -163,7 +163,7 @@ private:
     return levels.size() < static_cast<std::size_t>(max_price_levels_);
   }
 
-  [[nodiscard]] mex::OrderId Rest(mex::Side p_side, std::int64_t p_price, std::uint32_t p_quantity)
+  [[nodiscard]] mex::OrderId Rest(mex::Side p_side, mex::Price p_price, mex::Quantity p_quantity)
   {
     const mex::OrderId order_id = next_id_;
     ++next_id_;
@@ -181,13 +181,13 @@ private:
     return order_id;
   }
 
-  [[nodiscard]] std::uint32_t
-  Match(mex::Side p_aggressor, std::optional<std::int64_t> p_limit_price, std::uint32_t p_quantity)
+  [[nodiscard]] mex::Quantity Match(mex::Side p_aggressor, std::optional<mex::Price> p_limit_price,
+                                    mex::Quantity p_quantity)
   {
-    std::uint32_t remaining = p_quantity;
+    mex::Quantity remaining = p_quantity;
     auto &levels = Levels(p_aggressor == mex::Side::Buy ? mex::Side::Sell : mex::Side::Buy);
 
-    while (remaining > 0 && !levels.empty())
+    while (remaining > mex::Quantity{} && !levels.empty())
     {
       auto level = p_aggressor == mex::Side::Buy ? levels.begin() : std::prev(levels.end());
       if (p_limit_price.has_value() && !Crosses(p_aggressor, *p_limit_price, level->first))
@@ -196,15 +196,15 @@ private:
       }
 
       Queue &queue = level->second;
-      while (remaining > 0 && !queue.empty())
+      while (remaining > mex::Quantity{} && !queue.empty())
       {
         const mex::OrderId maker_id = queue.front();
         Order &maker = orders_[maker_id];
-        const std::uint32_t fill_qty = remaining < maker.quantity_ ? remaining : maker.quantity_;
+        const mex::Quantity fill_qty = remaining < maker.quantity_ ? remaining : maker.quantity_;
         maker.quantity_ -= fill_qty;
         remaining -= fill_qty;
         trades_.push_back(Trade{level->first, fill_qty});
-        if (maker.quantity_ == 0)
+        if (maker.quantity_ == mex::Quantity{})
         {
           maker.live_ = false;
           queue.pop_front();
@@ -220,8 +220,8 @@ private:
     return p_quantity - remaining;
   }
 
-  [[nodiscard]] static bool Crosses(mex::Side p_aggressor, std::int64_t p_limit_price,
-                                    std::int64_t p_maker_price)
+  [[nodiscard]] static bool Crosses(mex::Side p_aggressor, mex::Price p_limit_price,
+                                    mex::Price p_maker_price)
   {
     if (p_aggressor == mex::Side::Buy)
     {
@@ -230,7 +230,7 @@ private:
     return p_limit_price <= p_maker_price;
   }
 
-  [[nodiscard]] static mex::SubmitResult Accepted(std::uint32_t p_filled, std::uint32_t p_remaining,
+  [[nodiscard]] static mex::SubmitResult Accepted(mex::Quantity p_filled, mex::Quantity p_remaining,
                                                   mex::OrderId p_order_id)
   {
     mex::SubmitResult result;
@@ -241,11 +241,11 @@ private:
     return result;
   }
 
-  [[nodiscard]] static mex::SubmitResult Rejected(std::uint32_t p_remaining)
+  [[nodiscard]] static mex::SubmitResult Rejected(mex::Quantity p_remaining)
   {
     mex::SubmitResult result;
     result.status_ = mex::SubmitStatus::Rejected;
-    result.filled_qty_ = 0;
+    result.filled_qty_ = mex::Quantity{};
     result.remaining_ = p_remaining;
     result.order_id_ = mex::kInvalidOrderId;
     return result;
@@ -256,8 +256,8 @@ private:
   std::uint32_t free_slots_ = 0;
   mex::OrderId next_id_ = 1;
   std::vector<Order> orders_;
-  std::map<std::int64_t, Queue> bids_;
-  std::map<std::int64_t, Queue> asks_;
+  std::map<mex::Price, Queue> bids_;
+  std::map<mex::Price, Queue> asks_;
   std::vector<Trade> trades_;
 };
 
@@ -312,8 +312,8 @@ private:
   {
     if (p_left[i].price_ != p_right[i].price_ || p_left[i].quantities_ != p_right[i].quantities_)
     {
-      ADD_FAILURE() << "level " << i << " price " << p_left[i].price_ << " vs "
-                    << p_right[i].price_;
+      ADD_FAILURE() << "level " << i << " price " << p_left[i].price_.ticks_ << " vs "
+                    << p_right[i].price_.ticks_;
       return false;
     }
   }
@@ -391,21 +391,22 @@ private:
     trades_.clear();
     filled_ids_.clear();
     auto on_fill =
-        [this](mex::OrderId p_maker_id, std::int64_t p_fill_price, std::uint32_t p_fill_qty)
+        [this](mex::OrderId p_maker_id, mex::Price p_fill_price, mex::Quantity p_fill_qty)
     {
       trades_.push_back(Trade{p_fill_price, p_fill_qty});
-      if (book_.Order(p_maker_id).quantity_ == 0)
+      if (book_.Order(p_maker_id).quantity_ == mex::Quantity{})
       {
         filled_ids_.push_back(p_maker_id);
       }
     };
 
+    const mex::Price price{p_price};
+    const mex::Quantity quantity{p_quantity};
     const mex::SubmitResult book_result =
-        p_market ? book_.SubmitMarketOrder(p_side, p_quantity, on_fill)
-                 : book_.SubmitLimitOrder(p_side, p_price, p_quantity, on_fill);
-    const mex::SubmitResult shadow_result = p_market
-                                                ? shadow_.SubmitMarket(p_side, p_quantity)
-                                                : shadow_.SubmitLimit(p_side, p_price, p_quantity);
+        p_market ? book_.SubmitMarketOrder(p_side, quantity, on_fill)
+                 : book_.SubmitLimitOrder(p_side, price, quantity, on_fill);
+    const mex::SubmitResult shadow_result = p_market ? shadow_.SubmitMarket(p_side, quantity)
+                                                     : shadow_.SubmitLimit(p_side, price, quantity);
     if (!SameResult(book_result, shadow_result) || !SameTrades() || !SameBook())
     {
       return false;
@@ -434,9 +435,10 @@ private:
         (p_book_result.order_id_ == mex::kInvalidOrderId) !=
             (p_shadow_result.order_id_ == mex::kInvalidOrderId))
     {
-      ADD_FAILURE() << "step " << step_ << " result filled " << p_book_result.filled_qty_ << " vs "
-                    << p_shadow_result.filled_qty_ << " remaining " << p_book_result.remaining_
-                    << " vs " << p_shadow_result.remaining_;
+      ADD_FAILURE() << "step " << step_ << " result filled " << p_book_result.filled_qty_.units_
+                    << " vs " << p_shadow_result.filled_qty_.units_ << " remaining "
+                    << p_book_result.remaining_.units_ << " vs "
+                    << p_shadow_result.remaining_.units_;
       return false;
     }
     return true;
