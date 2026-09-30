@@ -13,14 +13,14 @@ Design background and locked decisions: [`prep/design-spec.md`](prep/design-spec
 
 ## Requirements
 
-- C++26 compiler: GCC 16+ with `-fcontracts` (Clang does not implement contracts yet)
+- C++26 compiler: **GCC 16+** with working `-fcontracts` (configure fails otherwise). Clang is rejected.
 - [CMake](https://cmake.org/) 3.20+
 - [Ninja](https://ninja-build.org/) (required generator)
 - [Google Test](https://github.com/google/googletest) (system package, e.g. `gtest` on Arch)
 
 ## Build and test
 
-From the repo root:
+From the repo root (point CMake at GCC 16+ if that is not the default `c++`):
 
 ```bash
 cmake --preset ninja
@@ -30,7 +30,7 @@ ctest --preset ninja --output-on-failure
 
 Binaries land in `build/`: static library `libmex.a`, tests `test_book`, benchmark `bench_book`.
 
-Configure fails if CMake is not using Ninja (`-G Ninja` or the preset above).
+Configure fails if CMake is not using Ninja (`-G Ninja` or the preset above), if the compiler is not GCC 16+, or if `-fcontracts` does not compile.
 
 ## Formatting
 
