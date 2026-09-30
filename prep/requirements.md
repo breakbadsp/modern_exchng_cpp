@@ -2,8 +2,8 @@
 
 ## Environment / Toolchain
 
-- C++26, GCC 16+ (`-fcontracts`). Clang 22 does not parse contracts, so
-this tree configures with GCC only
+- C++26, GCC 16+ (`-fcontracts`). Configure fails on older GCC, on
+Clang, or if `-fcontracts` does not compile.
 - Arch Linux (Omarchy), all latest versions
 - Reflection stays unused; it is still GCC-only and not needed here
 
