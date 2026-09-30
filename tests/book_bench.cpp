@@ -29,11 +29,6 @@ void Report(std::string_view p_name, std::uint64_t p_operations, Clock::duration
   return Clock::now() - start;
 }
 
-struct NoFill
-{
-  void operator()(mex::OrderId, mex::Price, mex::Quantity) const {}
-};
-
 void BenchAppendToOneLevel()
 {
   constexpr std::uint32_t kOrders = 200000;
@@ -44,7 +39,7 @@ void BenchAppendToOneLevel()
         for (std::uint32_t i = 0; i < kOrders; ++i)
         {
           const mex::SubmitResult result =
-              book.SubmitLimitOrder(mex::Side::Buy, mex::Price{100}, mex::Quantity{1}, NoFill{});
+              book.SubmitLimitOrder(mex::Side::Buy, mex::Price{100}, mex::Quantity{1});
           if (result.status_ != mex::SubmitStatus::Accepted)
           {
             std::cerr << "append rejected\n";
@@ -67,7 +62,7 @@ void BenchRestAcrossLevels()
         {
           const mex::Price price{static_cast<std::int64_t>(i % kLevels)};
           const mex::SubmitResult result =
-              book.SubmitLimitOrder(mex::Side::Buy, price, mex::Quantity{1}, NoFill{});
+              book.SubmitLimitOrder(mex::Side::Buy, price, mex::Quantity{1});
           if (result.status_ != mex::SubmitStatus::Accepted)
           {
             std::cerr << "rest rejected\n";
@@ -88,7 +83,7 @@ void BenchCancel()
   {
     const mex::Price price{1000 + static_cast<std::int64_t>(i % 32)};
     const mex::SubmitResult result =
-        book.SubmitLimitOrder(mex::Side::Sell, price, mex::Quantity{1}, NoFill{});
+        book.SubmitLimitOrder(mex::Side::Sell, price, mex::Quantity{1});
     ids.push_back(result.order_id_);
   }
 
@@ -131,7 +126,7 @@ void BenchTakeBest()
   {
     const mex::Price price{10 + static_cast<std::int64_t>(i % kLevels)};
     const mex::SubmitResult result =
-        book.SubmitLimitOrder(mex::Side::Sell, price, mex::Quantity{1}, NoFill{});
+        book.SubmitLimitOrder(mex::Side::Sell, price, mex::Quantity{1});
     if (result.order_id_ == mex::kInvalidOrderId)
     {
       std::cerr << "seed ask rejected\n";
@@ -145,7 +140,7 @@ void BenchTakeBest()
         for (std::uint32_t i = 0; i < kOrders; ++i)
         {
           const mex::SubmitResult result =
-              book.SubmitLimitOrder(mex::Side::Buy, mex::Price{1000}, mex::Quantity{1}, NoFill{});
+              book.SubmitLimitOrder(mex::Side::Buy, mex::Price{1000}, mex::Quantity{1});
           if (result.filled_qty_ != mex::Quantity{1} || result.order_id_ != mex::kInvalidOrderId)
           {
             std::cerr << "take did not fill one lot\n";
@@ -196,7 +191,7 @@ void BenchMixedBook()
 
           const mex::Price price{static_cast<std::int64_t>(next() % kLevels)};
           const mex::SubmitResult result =
-              book.SubmitLimitOrder(mex::Side::Buy, price, mex::Quantity{1}, NoFill{});
+              book.SubmitLimitOrder(mex::Side::Buy, price, mex::Quantity{1});
           if (result.order_id_ == mex::kInvalidOrderId)
           {
             std::cerr << "mixed insert rejected\n";

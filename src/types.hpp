@@ -23,6 +23,9 @@ using OrderId = std::uint32_t;
 
 constexpr OrderId kInvalidOrderId = std::numeric_limits<OrderId>::max();
 
+static_assert(sizeof(OrderId) == 4);
+static_assert(kInvalidOrderId == std::numeric_limits<OrderId>::max());
+
 // Integer ticks. Distinct from Quantity so a price cannot be passed as a size.
 struct Price
 {
@@ -30,6 +33,8 @@ struct Price
 
   constexpr auto operator<=>(const Price &) const = default;
 };
+
+static_assert(sizeof(Price) == 8);
 
 // Order size. Distinct from Price, OrderId, and level order_count_.
 struct Quantity
@@ -39,13 +44,17 @@ struct Quantity
   constexpr auto operator<=>(const Quantity &) const = default;
 };
 
+static_assert(sizeof(Quantity) == 4);
+
 constexpr Quantity &operator+=(Quantity &p_lhs, Quantity p_rhs)
+    pre(static_cast<std::uint64_t>(p_lhs.units_) + p_rhs.units_ <=
+        std::numeric_limits<std::uint32_t>::max())
 {
   p_lhs.units_ += p_rhs.units_;
   return p_lhs;
 }
 
-constexpr Quantity &operator-=(Quantity &p_lhs, Quantity p_rhs)
+constexpr Quantity &operator-=(Quantity &p_lhs, Quantity p_rhs) pre(p_lhs.units_ >= p_rhs.units_)
 {
   p_lhs.units_ -= p_rhs.units_;
   return p_lhs;
@@ -71,6 +80,15 @@ struct SubmitResult
   OrderId order_id_ = kInvalidOrderId;
 };
 
+// One maker fill from the last SubmitLimitOrder / SubmitMarketOrder.
+struct Fill
+{
+  OrderId maker_id_ = kInvalidOrderId;
+  Price price_{};
+  Quantity quantity_{};
+  bool maker_removed_ = false;
+};
+
 // A resting limit order. The pool index is the order id, so it is not stored again.
 struct OrderNode
 {
@@ -91,5 +109,11 @@ struct PriceLevel
   std::uint32_t order_count_ = 0;
   std::uint64_t total_qty_ = 0;
 };
+
+// Layout is part of the design: no extra hidden fields, stable for the pool.
+static_assert(sizeof(OrderNode) == 24);
+static_assert(sizeof(PriceLevel) == 32);
+static_assert(sizeof(Fill) == 24);
+static_assert(alignof(OrderNode) == 8);
 
 } // namespace mex

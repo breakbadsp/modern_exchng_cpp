@@ -77,15 +77,12 @@ docs/         naming and C++ standards reference
 
 mex::Book book(max_orders, max_price_levels);
 
-auto on_fill = [](mex::OrderId p_maker_id, mex::Price p_price, mex::Quantity p_qty) {
-    // record trade
-};
-
 mex::SubmitResult r =
-    book.SubmitLimitOrder(mex::Side::Buy, mex::Price{100}, mex::Quantity{10}, on_fill);
+    book.SubmitLimitOrder(mex::Side::Buy, mex::Price{100}, mex::Quantity{10});
 // r.status_, r.filled_qty_, r.remaining_, r.order_id_
+// book.Fills() is the maker fills from this submit only
 
-book.CancelOrder(r.order_id);
+book.CancelOrder(r.order_id_);
 ```
 
 Public API lives in `src/book.hpp`; include directory is `src/` when linking against `mex`.
