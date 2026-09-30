@@ -634,4 +634,40 @@ TEST(Scenario, MixedOrdersKeepTheBookConsistent)
   ExpectBookInvariants(book);
 }
 
+TEST(Fills, LastSubmitReplacesTheFillBuffer)
+{
+  mex::Book book(4, 2);
+  FillLog log;
+
+  const mex::SubmitResult first_maker = SubmitLimit(book, log, mex::Side::Sell, 100, 2);
+  const mex::SubmitResult first_take = SubmitLimit(book, log, mex::Side::Buy, 100, 2);
+  ExpectTrade(first_take, 2, 0, false);
+  ASSERT_EQ(book.Fills().size(), std::size_t{1});
+  ExpectFill(book.Fills()[0], first_maker.order_id_, 100, 2);
+
+  log.Clear();
+  const mex::SubmitResult second_maker = SubmitLimit(book, log, mex::Side::Sell, 101, 3);
+  const mex::SubmitResult second_take = SubmitLimit(book, log, mex::Side::Buy, 101, 3);
+  ExpectTrade(second_take, 3, 0, false);
+  ASSERT_EQ(book.Fills().size(), std::size_t{1});
+  ExpectFill(book.Fills()[0], second_maker.order_id_, 101, 3);
+  EXPECT_EQ(log.Records().size(), std::size_t{1});
+}
+
+TEST(Matching, TakesMaxQuantityFromASmallerMaker)
+{
+  mex::Book book(2, 2);
+  FillLog log;
+
+  const mex::SubmitResult maker = SubmitLimit(book, log, mex::Side::Sell, 7, 4);
+  const mex::SubmitResult taker =
+      SubmitMarket(book, log, mex::Side::Buy, std::numeric_limits<std::uint32_t>::max());
+  ExpectTrade(taker, 4, 0, false);
+  ASSERT_EQ(log.Records().size(), std::size_t{1});
+  ExpectFill(log.Records()[0], maker.order_id_, 7, 4);
+  ExpectBookInvariants(book);
+  EXPECT_TRUE(book.Asks().empty());
+  EXPECT_TRUE(book.Bids().empty());
+}
+
 } // namespace

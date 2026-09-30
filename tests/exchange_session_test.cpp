@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <deque>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <random>
@@ -264,11 +265,10 @@ private:
 [[nodiscard]] std::vector<LevelSnap> LevelsAscending(const mex::Book &p_book, mex::Side p_side)
 {
   std::vector<LevelSnap> snaps;
-  const std::vector<mex::PriceLevel> &stored =
-      p_side == mex::Side::Buy ? p_book.Bids() : p_book.Asks();
+  const mex::PriceLadder &stored = p_side == mex::Side::Buy ? p_book.Bids() : p_book.Asks();
+  snaps.reserve(stored.size());
   if (p_side == mex::Side::Buy)
   {
-    snaps.reserve(stored.size());
     for (const mex::PriceLevel &level : stored)
     {
       LevelSnap snap;
@@ -284,12 +284,12 @@ private:
     return snaps;
   }
 
-  snaps.reserve(stored.size());
-  for (auto it = stored.rbegin(); it != stored.rend(); ++it)
+  for (std::size_t i = stored.size(); i > 0; --i)
   {
+    const mex::PriceLevel &level = stored[i - 1];
     LevelSnap snap;
-    snap.price_ = it->price_;
-    mex::OrderId id = it->head_;
+    snap.price_ = level.price_;
+    mex::OrderId id = level.head_;
     while (id != mex::kInvalidOrderId)
     {
       snap.quantities_.push_back(p_book.Order(id).quantity_);
@@ -390,21 +390,20 @@ private:
   {
     trades_.clear();
     filled_ids_.clear();
-    auto on_fill =
-        [this](mex::OrderId p_maker_id, mex::Price p_fill_price, mex::Quantity p_fill_qty)
-    {
-      trades_.push_back(Trade{p_fill_price, p_fill_qty});
-      if (book_.Order(p_maker_id).quantity_ == mex::Quantity{})
-      {
-        filled_ids_.push_back(p_maker_id);
-      }
-    };
 
     const mex::Price price{p_price};
     const mex::Quantity quantity{p_quantity};
-    const mex::SubmitResult book_result =
-        p_market ? book_.SubmitMarketOrder(p_side, quantity, on_fill)
-                 : book_.SubmitLimitOrder(p_side, price, quantity, on_fill);
+    const mex::SubmitResult book_result = p_market
+                                              ? book_.SubmitMarketOrder(p_side, quantity)
+                                              : book_.SubmitLimitOrder(p_side, price, quantity);
+    for (const mex::Fill &fill : book_.Fills())
+    {
+      trades_.push_back(Trade{fill.price_, fill.quantity_});
+      if (fill.maker_removed_)
+      {
+        filled_ids_.push_back(fill.maker_id_);
+      }
+    }
     const mex::SubmitResult shadow_result = p_market ? shadow_.SubmitMarket(p_side, quantity)
                                                      : shadow_.SubmitLimit(p_side, price, quantity);
     if (!SameResult(book_result, shadow_result) || !SameTrades() || !SameBook())
@@ -531,6 +530,28 @@ TEST(ExchangeSession, DropsRemainderWhenTheNewLevelCannotFit)
   ASSERT_TRUE(session.CancelAll());
 }
 
+TEST(ExchangeSession, BoundaryQuantitiesExtremePricesAndFullBook)
+{
+  Session session(4, 2);
+  constexpr std::int64_t kHigh = std::numeric_limits<std::int64_t>::max();
+  constexpr std::int64_t kLow = std::numeric_limits<std::int64_t>::min();
+
+  ASSERT_TRUE(session.Limit(mex::Side::Buy, 100, 0));
+  ASSERT_TRUE(session.Market(mex::Side::Sell, 0));
+  ASSERT_TRUE(session.Limit(mex::Side::Buy, kLow, 1));
+  ASSERT_TRUE(session.Limit(mex::Side::Sell, kHigh, 1));
+  ASSERT_TRUE(session.Limit(mex::Side::Buy, 0, std::numeric_limits<std::uint32_t>::max()));
+  ASSERT_TRUE(session.CancelAll());
+
+  Session full(2, 2);
+  ASSERT_TRUE(full.Limit(mex::Side::Buy, 10, 1));
+  ASSERT_TRUE(full.Limit(mex::Side::Buy, 11, 1));
+  ASSERT_TRUE(full.Limit(mex::Side::Buy, 9, 1));
+  ASSERT_TRUE(full.Limit(mex::Side::Sell, 20, 1));
+  ASSERT_TRUE(full.Limit(mex::Side::Sell, 21, 1));
+  ASSERT_TRUE(full.CancelAll());
+}
+
 TEST(ExchangeSession, RandomFlowMatchesTheReferenceBook)
 {
   const struct
@@ -554,7 +575,37 @@ TEST(ExchangeSession, RandomFlowMatchesTheReferenceBook)
     std::uniform_int_distribution<int> action(0, 99);
     std::uniform_int_distribution<int> price_dist(0, config.price_span);
     std::uniform_int_distribution<int> qty_dist(1, 9);
+    std::uniform_int_distribution<int> qty_kind(0, 19);
+    std::uniform_int_distribution<int> price_kind(0, 19);
     std::uniform_int_distribution<int> side_bit(0, 1);
+
+    auto choose_price = [&]() -> std::int64_t
+    {
+      const int kind = price_kind(rng);
+      if (kind == 0)
+      {
+        return std::numeric_limits<std::int64_t>::min();
+      }
+      if (kind == 1)
+      {
+        return std::numeric_limits<std::int64_t>::max();
+      }
+      return price_dist(rng);
+    };
+
+    auto choose_qty = [&]() -> std::uint32_t
+    {
+      const int kind = qty_kind(rng);
+      if (kind == 0)
+      {
+        return 0;
+      }
+      if (kind == 1)
+      {
+        return 1U << 16U;
+      }
+      return static_cast<std::uint32_t>(qty_dist(rng));
+    };
 
     for (int step = 0; step < config.steps; ++step)
     {
@@ -563,12 +614,11 @@ TEST(ExchangeSession, RandomFlowMatchesTheReferenceBook)
       const mex::Side side = side_bit(rng) == 0 ? mex::Side::Buy : mex::Side::Sell;
       if (roll < 60)
       {
-        ASSERT_TRUE(
-            session.Limit(side, price_dist(rng), static_cast<std::uint32_t>(qty_dist(rng))));
+        ASSERT_TRUE(session.Limit(side, choose_price(), choose_qty()));
       }
       else if (roll < 80)
       {
-        ASSERT_TRUE(session.Market(side, static_cast<std::uint32_t>(qty_dist(rng))));
+        ASSERT_TRUE(session.Market(side, choose_qty()));
       }
       else if (session.LiveCount() > 0)
       {
@@ -577,8 +627,7 @@ TEST(ExchangeSession, RandomFlowMatchesTheReferenceBook)
       }
       else
       {
-        ASSERT_TRUE(
-            session.Limit(side, price_dist(rng), static_cast<std::uint32_t>(qty_dist(rng))));
+        ASSERT_TRUE(session.Limit(side, choose_price(), choose_qty()));
       }
     }
     session.SetStep(config.steps);

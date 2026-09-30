@@ -4,36 +4,29 @@
 
 #include <cstdint>
 #include <gtest/gtest.h>
+#include <span>
 #include <vector>
 
 namespace book_test
 {
 
-struct Fill
-{
-  mex::OrderId maker_id_ = mex::kInvalidOrderId;
-  mex::Price price_{};
-  mex::Quantity quantity_{};
-};
-
 class FillLog
 {
 public:
-  [[nodiscard]] auto Callback()
+  void Capture(std::span<const mex::Fill> p_fills)
   {
-    return [this](mex::OrderId p_maker_id, mex::Price p_price, mex::Quantity p_quantity)
-    { records_.push_back(Fill{p_maker_id, p_price, p_quantity}); };
+    records_.insert(records_.end(), p_fills.begin(), p_fills.end());
   }
 
-  [[nodiscard]] const std::vector<Fill> &Records() const { return records_; }
+  [[nodiscard]] const std::vector<mex::Fill> &Records() const { return records_; }
 
   void Clear() { records_.clear(); }
 
 private:
-  std::vector<Fill> records_;
+  std::vector<mex::Fill> records_;
 };
 
-inline void ExpectFill(Fill p_fill, mex::OrderId p_maker_id, std::int64_t p_price,
+inline void ExpectFill(mex::Fill p_fill, mex::OrderId p_maker_id, std::int64_t p_price,
                        std::uint32_t p_quantity)
 {
   EXPECT_EQ(p_fill.maker_id_, p_maker_id);
@@ -76,14 +69,18 @@ inline void ExpectRejected(mex::SubmitResult p_result, std::uint32_t p_remaining
 inline mex::SubmitResult SubmitLimit(mex::Book &p_book, FillLog &p_log, mex::Side p_side,
                                      std::int64_t p_price, std::uint32_t p_quantity)
 {
-  return p_book.SubmitLimitOrder(p_side, mex::Price{p_price}, mex::Quantity{p_quantity},
-                                 p_log.Callback());
+  const mex::SubmitResult result =
+      p_book.SubmitLimitOrder(p_side, mex::Price{p_price}, mex::Quantity{p_quantity});
+  p_log.Capture(p_book.Fills());
+  return result;
 }
 
 inline mex::SubmitResult SubmitMarket(mex::Book &p_book, FillLog &p_log, mex::Side p_side,
                                       std::uint32_t p_quantity)
 {
-  return p_book.SubmitMarketOrder(p_side, mex::Quantity{p_quantity}, p_log.Callback());
+  const mex::SubmitResult result = p_book.SubmitMarketOrder(p_side, mex::Quantity{p_quantity});
+  p_log.Capture(p_book.Fills());
+  return result;
 }
 
 inline void ExpectLevelList(const mex::Book &p_book, mex::PriceLevel p_level, mex::Side p_side)
