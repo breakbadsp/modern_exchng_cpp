@@ -59,15 +59,8 @@ Design target: **100k–500k+** order ops/s on one thread ([`prep/requirements.m
 ./build/bench_book
 ```
 
-Example on Linux/x86_64 (GCC, `-O3`; rerun locally after changes):
-
-| Workload | Throughput |
-|----------|-------------|
-| Append at one price | ~62M ops/s |
-| Rest across 64 levels | ~45M ops/s |
-| Cancel (random order) | ~30M ops/s |
-| Take one lot at touch | ~64M ops/s |
-| Mixed insert + cancel | ~19M ops/s |
+`bench_book` prints throughput (ops/s) from a loop with no per-op clock calls, plus
+p50 / p99 / max latency from a separate per-op-timed pass. Rerun locally after changes.
 
 Methodology and full table: [`docs/performance.md`](docs/performance.md).
 
