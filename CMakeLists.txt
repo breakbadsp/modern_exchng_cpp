@@ -80,8 +80,8 @@ find_package(GTest REQUIRED)
 
 add_executable(test_book
     tests/book_test.cpp
-    tests/book_alloc_test.cpp
     tests/exchange_session_test.cpp
+    tests/alloc_count_test.cpp
 )
 target_link_libraries(test_book PRIVATE mex GTest::gtest_main)
 target_include_directories(test_book PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
@@ -103,8 +103,8 @@ if(CLANG_FORMAT_EXECUTABLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/book.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/book.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/types.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/alloc_count_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_bench.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_alloc_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_checks.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_session_test.cpp
