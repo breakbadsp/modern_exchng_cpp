@@ -13,14 +13,14 @@ Design background and locked decisions: [`prep/design-spec.md`](prep/design-spec
 
 ## Requirements
 
-- C++26 compiler: GCC 16+ with `-fcontracts` (Clang does not implement contracts yet)
+- C++26 compiler: **GCC 16+** with working `-fcontracts` (configure fails otherwise). Clang is rejected.
 - [CMake](https://cmake.org/) 3.20+
 - [Ninja](https://ninja-build.org/) (required generator)
 - [Google Test](https://github.com/google/googletest) (system package, e.g. `gtest` on Arch)
 
 ## Build and test
 
-From the repo root:
+From the repo root (point CMake at GCC 16+ if that is not the default `c++`):
 
 ```bash
 cmake --preset ninja
@@ -28,9 +28,19 @@ cmake --build --preset ninja
 ctest --preset ninja --output-on-failure
 ```
 
-Binaries land in `build/`: static library `libmex.a`, tests `test_book`, benchmark `bench_book`.
+AddressSanitizer and UndefinedBehaviorSanitizer (together):
 
-Configure fails if CMake is not using Ninja (`-G Ninja` or the preset above).
+```bash
+cmake --preset ninja-asan-ubsan
+cmake --build --preset ninja-asan-ubsan
+ctest --preset ninja-asan-ubsan --output-on-failure
+```
+
+Or pass `-DMEX_ENABLE_ASAN=ON` and/or `-DMEX_ENABLE_UBSAN=ON` to a Ninja configure.
+
+Binaries land in `build/` (or `build-asan-ubsan/`): static library `libmex.a`, tests `test_book`, benchmark `bench_book`.
+
+Configure fails if CMake is not using Ninja (`-G Ninja` or the preset above), if the compiler is not GCC 16+, or if `-fcontracts` does not compile.
 
 ## Formatting
 
@@ -49,15 +59,8 @@ Design target: **100k–500k+** order ops/s on one thread ([`prep/requirements.m
 ./build/bench_book
 ```
 
-Example on Linux/x86_64 (GCC, `-O3`; rerun locally after changes):
-
-| Workload | Throughput |
-|----------|-------------|
-| Append at one price | ~62M ops/s |
-| Rest across 64 levels | ~45M ops/s |
-| Cancel (random order) | ~30M ops/s |
-| Take one lot at touch | ~64M ops/s |
-| Mixed insert + cancel | ~19M ops/s |
+`bench_book` prints throughput (ops/s) from a loop with no per-op clock calls, plus
+p50 / p99 / max latency from a separate per-op-timed pass. Rerun locally after changes.
 
 Methodology and full table: [`docs/performance.md`](docs/performance.md).
 

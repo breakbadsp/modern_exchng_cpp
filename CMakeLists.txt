@@ -6,17 +6,68 @@ endif()
 
 project(modern_exchng)
 
-set(CMAKE_CXX_STANDARD 26)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# CMake 3.28 does not enable GNU 16's C++26 dialect via CMAKE_CXX_STANDARD 26.
+# Pass -std=c++26 on the command line with contracts.
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# C++26 contracts (pre / post / contract_assert). Clang 22 does not parse them.
+# C++26 contracts (pre / post / contract_assert). Only GCC 16+ implements them.
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     message(FATAL_ERROR
-        "This project uses C++26 contracts (-fcontracts), which GCC implements and Clang does not.")
+        "Build only with GCC 16 or newer (C++26 contracts, -fcontracts). "
+        "${CMAKE_CXX_COMPILER_ID} is not supported.")
 endif()
-add_compile_options(-fcontracts)
+if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
+    message(FATAL_ERROR
+        "Build only with GCC 16 or newer (C++26 contracts, -fcontracts). "
+        "This compiler is GCC ${CMAKE_CXX_COMPILER_VERSION}.")
+endif()
+
+file(WRITE "${CMAKE_BINARY_DIR}/mex_check_contracts.cpp"
+"int Inc(int x)
+  pre(x >= 0)
+{
+  return x + 1;
+}
+int main()
+{
+  return Inc(0) == 1 ? 0 : 1;
+}
+")
+execute_process(
+    COMMAND "${CMAKE_CXX_COMPILER}" -std=c++26 -fcontracts
+            "${CMAKE_BINARY_DIR}/mex_check_contracts.cpp"
+            -o "${CMAKE_BINARY_DIR}/mex_check_contracts.bin"
+    RESULT_VARIABLE MEX_CONTRACTS_COMPILE_RESULT
+    OUTPUT_VARIABLE MEX_CONTRACTS_COMPILE_OUT
+    ERROR_VARIABLE MEX_CONTRACTS_COMPILE_ERR
+)
+if(NOT MEX_CONTRACTS_COMPILE_RESULT EQUAL 0)
+    message(FATAL_ERROR
+        "This GCC does not compile C++26 contracts with -fcontracts. "
+        "Use the latest GCC that supports contracts (16+).\n"
+        "${MEX_CONTRACTS_COMPILE_OUT}${MEX_CONTRACTS_COMPILE_ERR}")
+endif()
+
+add_compile_options(-std=c++26 -fcontracts)
 add_link_options(-fcontracts)
+
+option(MEX_ENABLE_ASAN "Compile and link with AddressSanitizer" OFF)
+option(MEX_ENABLE_UBSAN "Compile and link with UndefinedBehaviorSanitizer" OFF)
+
+set(MEX_SANITIZER_LIST "")
+if(MEX_ENABLE_ASAN)
+    list(APPEND MEX_SANITIZER_LIST address)
+    add_compile_options(-fno-omit-frame-pointer)
+endif()
+if(MEX_ENABLE_UBSAN)
+    list(APPEND MEX_SANITIZER_LIST undefined)
+    add_compile_options(-fno-sanitize-recover=undefined)
+endif()
+if(MEX_SANITIZER_LIST)
+    list(JOIN MEX_SANITIZER_LIST "," MEX_SANITIZER_CSV)
+    add_compile_options(-fsanitize=${MEX_SANITIZER_CSV})
+    add_link_options(-fsanitize=${MEX_SANITIZER_CSV})
+endif()
 
 add_library(mex STATIC src/book.cpp)
 target_include_directories(mex PUBLIC
@@ -29,8 +80,8 @@ find_package(GTest REQUIRED)
 
 add_executable(test_book
     tests/book_test.cpp
-    tests/book_alloc_test.cpp
     tests/exchange_session_test.cpp
+    tests/alloc_count_test.cpp
 )
 target_link_libraries(test_book PRIVATE mex GTest::gtest_main)
 target_include_directories(test_book PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
@@ -52,8 +103,8 @@ if(CLANG_FORMAT_EXECUTABLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/book.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/book.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/types.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/alloc_count_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_bench.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_alloc_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_checks.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_session_test.cpp

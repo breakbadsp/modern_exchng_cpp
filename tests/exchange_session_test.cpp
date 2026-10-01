@@ -635,4 +635,40 @@ TEST(ExchangeSession, RandomFlowMatchesTheReferenceBook)
   }
 }
 
+TEST(ExchangeSession, FiveHundredSeededSubmitCancelSequencesMatch)
+{
+  constexpr int kSequences = 512;
+  constexpr int kSteps = 64;
+
+  for (int seq = 0; seq < kSequences; ++seq)
+  {
+    const std::uint32_t seed = 2000u + static_cast<std::uint32_t>(seq);
+    SCOPED_TRACE(seed);
+    Session session(24, 6);
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> action(0, 99);
+    std::uniform_int_distribution<int> price_dist(0, 8);
+    std::uniform_int_distribution<int> qty_dist(1, 6);
+    std::uniform_int_distribution<int> side_bit(0, 1);
+
+    for (int step = 0; step < kSteps; ++step)
+    {
+      session.SetStep(step);
+      const mex::Side side = side_bit(rng) == 0 ? mex::Side::Buy : mex::Side::Sell;
+      if (action(rng) < 70 || session.LiveCount() == 0)
+      {
+        ASSERT_TRUE(
+            session.Limit(side, price_dist(rng), static_cast<std::uint32_t>(qty_dist(rng))));
+      }
+      else
+      {
+        std::uniform_int_distribution<std::size_t> pick(0, session.LiveCount() - 1);
+        ASSERT_TRUE(session.CancelAt(pick(rng)));
+      }
+    }
+    session.SetStep(kSteps);
+    ASSERT_TRUE(session.CancelAll());
+  }
+}
+
 } // namespace
