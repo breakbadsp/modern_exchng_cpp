@@ -128,7 +128,7 @@ struct Temperature
     double kelvin;
 };
 
-Temperature Boil(const Temperature& water);
+Temperature Boil(Temperature water);  // trivially copyable: by value (F.16)
 ```
 
 ```cpp
@@ -464,7 +464,7 @@ enum class ParseError
     InvalidFormat,
 };
 
-std::expected<int, ParseError> ParseCount(std::string_view input)
+[[nodiscard]] std::expected<int, ParseError> ParseCount(std::string_view input)
 {
     if (input.empty())
     {
@@ -535,8 +535,8 @@ auto greeting = FindUserId("sachin")
 ```cpp
 [[nodiscard]] std::expected<int, ParseError> ParseCount(std::string_view input);
 
-// Ignoring this won't compile silently — matches Rust's #[must_use] Result
-auto result = ParseCount(raw_input);
+ParseCount(raw_input);  // warning: ignoring a [[nodiscard]] result; an error with -Werror
+auto result = ParseCount(raw_input);  // OK: the result is kept and must be checked
 ```
 
 ### Anti-patterns
@@ -580,7 +580,10 @@ public:
     }
 
 private:
-    const std::string id_;  // Con.4: never changes after construction
+    // Con.4: fixed after construction because nothing assigns it. Not a
+    // const member: that would block copy/move assignment (see the
+    // Classes anti-patterns).
+    std::string id_;
     double reading_{0.0};
 };
 
@@ -869,7 +872,6 @@ Before marking C++ work complete:
 - [ ] Functions: PascalCase. Parameters: `p_` + snake_case. Locals:
   snake_case. Classes: PascalCase.
 - [ ] Every class and struct data member ends with `_`
-  plain snake_case
 - [ ] Every brace on its own line; braces present on every conditional/loop
 - [ ] 2-space indentation, no tabs; `clang-format-check` passes
 - [ ] No magic numbers (ES.45)
