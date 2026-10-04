@@ -459,15 +459,15 @@ and `Option<T>`, using the C++23 standard types built for exactly this:
 
 enum class ParseError
 {
-    kEmptyInput,
-    kInvalidFormat,
+    EmptyInput = 0,
+    InvalidFormat,
 };
 
 std::expected<int, ParseError> ParseCount(std::string_view input)
 {
     if (input.empty())
     {
-        return std::unexpected(ParseError::kEmptyInput);
+        return std::unexpected(ParseError::EmptyInput);
     }
     // ... parse ...
     return 42;
@@ -709,20 +709,21 @@ std::println("best bid: {}", best_bid_price);
 | **Enum.3** | `enum class` over plain `enum` |
 
 ```cpp
-// This project's convention: k-prefixed PascalCase enumerators
+// This project's convention: PascalCase enumerators, no k prefix, and an
+// explicit initializer on the first one
 enum class Color
 {
-    kRed,
-    kGreen,
-    kBlue,
+    Red = 0,
+    Green,
+    Blue,
 };
 
 enum class LogLevel
 {
-    kDebug,
-    kInfo,
-    kWarning,
-    kError,
+    Debug = 0,
+    Info,
+    Warning,
+    Error,
 };
 ```
 
