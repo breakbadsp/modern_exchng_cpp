@@ -356,7 +356,8 @@ public:
         std::FILE* handle = std::fopen(path.c_str(), "r");
         if (handle == nullptr)
         {
-            return std::unexpected(std::make_error_code(std::errc::no_such_file_or_directory));
+            // Report the real reason (missing file, permission denied, ...)
+            return std::unexpected(std::error_code(errno, std::generic_category()));
         }
         return FileHandle(handle);
     }
