@@ -125,15 +125,15 @@ reason not to.
 // P.10 + I.4: immutable, strongly typed interface
 struct Temperature
 {
-    double kelvin;
+  double kelvin_;
 };
 
-Temperature Boil(Temperature water);  // trivially copyable: by value (F.16)
+Temperature Boil(Temperature p_water);  // trivially copyable: by value (F.16)
 ```
 
 ```cpp
 // Weak interface: unclear ownership, unclear units
-double Boil(double* temp);
+double Boil(double* p_temp);
 
 // Non-const global variable — I.2 violation
 int g_counter = 0;
@@ -156,29 +156,29 @@ int g_counter = 0;
 ```cpp
 // F.16: trivially-copyable and cheap-to-copy → pass by value (value semantics).
 // A reference is never null; a pointer only when null is a valid state.
-void Print(int x);
-void Analyze(const std::string& data);  // large: const reference
-void Transform(std::string s);  // sink: by value, will move
-void Bump(Counter c);  // cheap handle: value semantics
-void Observe(const Widget* widget);  // null is a valid "nothing to draw" state
+void Print(int p_x);
+void Analyze(const std::string& p_data);  // large: const reference
+void Transform(std::string p_s);  // sink: by value, will move
+void Bump(Counter p_c);  // cheap handle: value semantics
+void Observe(const Widget* p_widget);  // null is a valid "nothing to draw" state
 
 // F.20 + F.21: return a struct, not output parameters
 struct ParseResult
 {
-    std::string token;
-    int position;
+  std::string token_;
+  int position_;
 };
 
-ParseResult Parse(std::string_view input);  // GOOD
+ParseResult Parse(std::string_view p_input);  // GOOD
 
-void Parse(std::string_view input, std::string& token, int& pos);  // avoid
+void Parse(std::string_view p_input, std::string& p_token, int& p_pos);  // avoid
 ```
 
 ```cpp
 // F.4 + F.8: pure, constexpr where possible
-constexpr int Factorial(int n) noexcept
+constexpr int Factorial(int p_n) noexcept
 {
-    return (n <= 1) ? 1 : n * Factorial(n - 1);
+  return (p_n <= 1) ? 1 : p_n * Factorial(p_n - 1);
 }
 
 static_assert(Factorial(5) == 120);
@@ -219,9 +219,9 @@ that's what a member (composition) is for.
 // C.20: let the compiler generate the special members
 struct Employee
 {
-    std::string name;
-    std::string department;
-    int id;
+  std::string name_;
+  std::string department_;
+  int id_;
 };
 ```
 
@@ -234,13 +234,13 @@ struct Employee
 class Formatter
 {
 public:
-    std::string FormatLine(std::string_view text);
+  std::string FormatLine(std::string_view p_text);
 };
 
 class TimestampedLogger : public Formatter  // wrong tool for the job
 {
 public:
-    void Log(std::string_view text);
+  void Log(std::string_view p_text);
 };
 ```
 
@@ -251,13 +251,13 @@ public:
 class TimestampedLogger
 {
 public:
-    void Log(std::string_view text)
-    {
-        std::println("[{}] {}", Timestamp(), formatter_.FormatLine(text));
-    }
+  void Log(std::string_view p_text)
+  {
+    std::println("[{}] {}", Timestamp(), formatter_.FormatLine(p_text));
+  }
 
 private:
-    Formatter formatter_;
+  Formatter formatter_;
 };
 ```
 
@@ -268,24 +268,24 @@ private:
 class Shape
 {
 public:
-    virtual ~Shape() = default;
-    virtual double Area() const = 0;
+  virtual ~Shape() = default;
+  virtual double Area() const = 0;
 };
 
 class Circle final : public Shape  // final: not meant to be a base itself
 {
 public:
-    explicit Circle(double r) : radius_(r)
-    {
-    }
+  explicit Circle(double p_radius) : radius_(p_radius)
+  {
+  }
 
-    double Area() const override
-    {
-        return 3.14159 * radius_ * radius_;
-    }
+  double Area() const override
+  {
+    return 3.14159 * radius_ * radius_;
+  }
 
 private:
-    double radius_;
+  double radius_;
 };
 ```
 
@@ -321,17 +321,17 @@ auto cache = std::make_shared<Cache>(1024);
 
 // R.3: a reference is never null. A raw pointer is a non-owning observer
 // only when null is a valid state.
-void Render(const Widget& w)
+void Render(const Widget& p_widget)
 {
-    w.Draw();
+  p_widget.Draw();
 }
 
-void RenderIfPresent(const Widget* w)
+void RenderIfPresent(const Widget* p_widget)
 {
-    if (w)
-    {
-        w->Draw();
-    }
+  if (p_widget)
+  {
+    p_widget->Draw();
+  }
 }
 ```
 
@@ -351,52 +351,52 @@ mechanism.
 class FileHandle
 {
 public:
-    static std::expected<FileHandle, std::error_code> Create(const std::string& path)
+  [[nodiscard]] static std::expected<FileHandle, std::error_code> Create(const std::string& p_path)
+  {
+    std::FILE* handle = std::fopen(p_path.c_str(), "r");
+    if (handle == nullptr)
     {
-        std::FILE* handle = std::fopen(path.c_str(), "r");
-        if (handle == nullptr)
-        {
-            // Report the real reason (missing file, permission denied, ...)
-            return std::unexpected(std::error_code(errno, std::generic_category()));
-        }
-        return FileHandle(handle);
+      // Report the real reason (missing file, permission denied, ...)
+      return std::unexpected(std::error_code(errno, std::generic_category()));
     }
+    return FileHandle(handle);
+  }
 
-    ~FileHandle()
+  ~FileHandle()
+  {
+    if (handle_ != nullptr)
     {
-        if (handle_ != nullptr)
-        {
-            std::fclose(handle_);
-        }
+      std::fclose(handle_);
     }
+  }
 
-    FileHandle(const FileHandle&) = delete;
-    FileHandle& operator=(const FileHandle&) = delete;
+  FileHandle(const FileHandle&) = delete;
+  FileHandle& operator=(const FileHandle&) = delete;
 
-    FileHandle(FileHandle&& other) noexcept
-        : handle_(std::exchange(other.handle_, nullptr))
+  FileHandle(FileHandle&& p_other) noexcept
+    : handle_(std::exchange(p_other.handle_, nullptr))
+  {
+  }
+
+  FileHandle& operator=(FileHandle&& p_other) noexcept
+  {
+    if (this != &p_other)
     {
+      if (handle_ != nullptr)
+      {
+        std::fclose(handle_);
+      }
+      handle_ = std::exchange(p_other.handle_, nullptr);
     }
-
-    FileHandle& operator=(FileHandle&& other) noexcept
-    {
-        if (this != &other)
-        {
-            if (handle_ != nullptr)
-            {
-                std::fclose(handle_);
-            }
-            handle_ = std::exchange(other.handle_, nullptr);
-        }
-        return *this;
-    }
+    return *this;
+  }
 
 private:
-    explicit FileHandle(std::FILE* handle) : handle_(handle)
-    {
-    }
+  explicit FileHandle(std::FILE* p_handle) : handle_(p_handle)
+  {
+  }
 
-    std::FILE* handle_;
+  std::FILE* handle_;
 };
 ```
 
@@ -460,18 +460,18 @@ and `Option<T>`, using the C++23 standard types built for exactly this:
 
 enum class ParseError
 {
-    EmptyInput = 0,
-    InvalidFormat,
+  EmptyInput = 0,
+  InvalidFormat,
 };
 
-[[nodiscard]] std::expected<int, ParseError> ParseCount(std::string_view input)
+[[nodiscard]] std::expected<int, ParseError> ParseCount(std::string_view p_input)
 {
-    if (input.empty())
-    {
-        return std::unexpected(ParseError::EmptyInput);
-    }
-    // ... parse ...
-    return 42;
+  if (p_input.empty())
+  {
+    return std::unexpected(ParseError::EmptyInput);
+  }
+  // ... parse ...
+  return 42;
 }
 ```
 
@@ -480,28 +480,28 @@ Both types got monadic operations in C++23 — `and_then`, `or_else`,
 step, the same shape as Rust's combinator chains:
 
 ```cpp
-std::expected<double, std::string> SafeDivide(double a, double b)
+[[nodiscard]] std::expected<double, std::string> SafeDivide(double p_a, double p_b)
 {
-    if (b == 0.0)
-    {
-        return std::unexpected("division by zero");
-    }
-    return a / b;
+  if (p_b == 0.0)
+  {
+    return std::unexpected("division by zero");
+  }
+  return p_a / p_b;
 }
 
 // Chain without an intermediate check at every step
 auto result = SafeDivide(10.0, 2.0)
-    .and_then([](double r) { return SafeDivide(r, 0.5); })
-    .transform([](double r) { return r * 2.0; });
+  .and_then([](double p_r) { return SafeDivide(p_r, 0.5); })
+  .transform([](double p_r) { return p_r * 2.0; });
 ```
 
 ```cpp
 // std::optional monadic chain — the Option<T> equivalent
-std::optional<int> FindUserId(std::string_view name);
+[[nodiscard]] std::optional<int> FindUserId(std::string_view p_name);
 
 auto greeting = FindUserId("sachin")
-    .transform([](int id) { return std::format("Hello, user {}", id); })
-    .value_or("Hello, guest");
+  .transform([](int p_id) { return std::format("Hello, user {}", p_id); })
+  .value_or("Hello, guest");
 ```
 
 ### Rules
@@ -533,7 +533,7 @@ auto greeting = FindUserId("sachin")
   to make this a compiler-enforced guarantee, not a convention.
 
 ```cpp
-[[nodiscard]] std::expected<int, ParseError> ParseCount(std::string_view input);
+[[nodiscard]] std::expected<int, ParseError> ParseCount(std::string_view p_input);
 
 ParseCount(raw_input);  // warning: ignoring a [[nodiscard]] result; an error with -Werror
 auto result = ParseCount(raw_input);  // OK: the result is kept and must be checked
@@ -560,31 +560,31 @@ auto result = ParseCount(raw_input);  // OK: the result is kept and must be chec
 class Sensor
 {
 public:
-    explicit Sensor(std::string id) : id_(std::move(id))
-    {
-    }
+  explicit Sensor(std::string p_id) : id_(std::move(p_id))
+  {
+  }
 
-    const std::string& Id() const
-    {
-        return id_;
-    }
+  const std::string& Id() const
+  {
+    return id_;
+  }
 
-    double LastReading() const
-    {
-        return reading_;
-    }
+  double LastReading() const
+  {
+    return reading_;
+  }
 
-    void Record(double value)
-    {
-        reading_ = value;
-    }
+  void Record(double p_value)
+  {
+    reading_ = p_value;
+  }
 
 private:
-    // Con.4: fixed after construction because nothing assigns it. Not a
-    // const member: that would block copy/move assignment (see the
-    // Classes anti-patterns).
-    std::string id_;
-    double reading_{0.0};
+  // Con.4: fixed after construction because nothing assigns it. Not a
+  // const member: that would block copy/move assignment (see the
+  // Classes anti-patterns).
+  std::string id_;
+  double reading_{0.0};
 };
 
 // Con.5: compile-time constants, k-prefixed per this project's convention
@@ -612,17 +612,17 @@ infrastructure (feed handlers, logging, admin interfaces) that isn't.
 class ThreadSafeQueue
 {
 public:
-    void Push(int value)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);  // CP.44: named
-        queue_.push(value);
-        cv_.notify_one();
-    }
+  void Push(int p_value)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);  // CP.44: named
+    queue_.push(p_value);
+    cv_.notify_one();
+  }
 
 private:
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::queue<int> queue_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::queue<int> queue_;
 };
 ```
 
@@ -637,8 +637,8 @@ thread while a neighboring field is written by another.
 ```cpp
 struct alignas(64) PaddedCounter
 {
-    std::atomic<uint64_t> value{0};
-    // implicit padding to the next 64-byte boundary
+  std::atomic<uint64_t> value_{0};
+  // implicit padding to the next 64-byte boundary
 };
 ```
 
@@ -663,19 +663,19 @@ struct alignas(64) PaddedCounter
 #include <concepts>
 
 template <std::integral T>
-T Gcd(T a, T b)
+T Gcd(T p_a, T p_b)
 {
-    while (b != 0)
-    {
-        a = std::exchange(b, a % b);
-    }
-    return a;
+  while (p_b != 0)
+  {
+    p_a = std::exchange(p_b, p_a % p_b);
+  }
+  return p_a;
 }
 
 template <typename T>
 concept Serializable = requires(const T& t)
 {
-    { t.Serialize() } -> std::convertible_to<std::string>;
+  { t.Serialize() } -> std::convertible_to<std::string>;
 };
 ```
 
@@ -717,17 +717,17 @@ std::println("best bid: {}", best_bid_price);
 // explicit initializer on the first one
 enum class Color
 {
-    Red = 0,
-    Green,
-    Blue,
+  Red = 0,
+  Green,
+  Blue,
 };
 
 enum class LogLevel
 {
-    Debug = 0,
-    Info,
-    Warning,
-    Error,
+  Debug = 0,
+  Info,
+  Warning,
+  Error,
 };
 ```
 
@@ -783,9 +783,9 @@ std::vector<Point> points;                            // GOOD
 std::vector<std::unique_ptr<Point>> indirect_points;   // BAD: pointer chasing
 
 // C++20 branch hints for a measured hot/cold split
-if (order.quantity == 0) [[unlikely]]
+if (order.quantity_ == 0) [[unlikely]]
 {
-    return HandleFullyFilled(order);
+  return HandleFullyFilled(order);
 }
 ```
 
@@ -833,11 +833,11 @@ namespace hft
 class Widget
 {
 public:
-    explicit Widget(std::string name);
-    const std::string& Name() const;
+  explicit Widget(std::string p_name);
+  const std::string& Name() const;
 
 private:
-    std::string name_;
+  std::string name_;
 };
 
 }  // namespace hft
