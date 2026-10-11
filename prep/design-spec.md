@@ -192,3 +192,6 @@ array, size ≤ capacity, no reallocation after construct).
 Steps: (1) Order representation — **done**. (2) Order book structure —
 **done**. (3) Matching — **done**. Next work is above `Book` (client ids,
 modify, multi-symbol).
+
+The layer above `Book` (gateway, queues, engine threads, client ids,
+multi-symbol routing) is designed in [`io-design-spec.md`](io-design-spec.md).
