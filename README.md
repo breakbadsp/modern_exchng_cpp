@@ -9,7 +9,7 @@ Single-symbol limit order book with price-time (FIFO) matching. One `mex::Book` 
 - **Single-threaded**, no heap allocation on the hot path after setup
 - Prices are **integer ticks** (`mex::Price`); order sizes are `mex::Quantity` (`uint32_t` units). Level totals stay `uint64_t`.
 
-Design background and locked decisions: [`prep/design-spec.md`](prep/design-spec.md). C++ style: [`docs/naming-conventions.md`](docs/naming-conventions.md) (2-space indent, Allman braces; enforced by [`.clang-format`](.clang-format)).
+Design background and locked decisions: [`prep/design-spec.md`](prep/design-spec.md). Gateway, queues, and engine threads: [`prep/io-design-spec.md`](prep/io-design-spec.md). C++ style: [`docs/naming-conventions.md`](docs/naming-conventions.md) (2-space indent, Allman braces; enforced by [`.clang-format`](.clang-format)).
 
 ## Requirements
 
@@ -89,6 +89,18 @@ book.CancelOrder(r.order_id_);
 ```
 
 Public API lives in `src/book.hpp`; include directory is `src/` when linking against `mex`.
+
+## TODO
+
+The work above `Book`: gateway, queues, and engine threads. Design and open
+decisions: [`prep/io-design-spec.md`](prep/io-design-spec.md).
+
+- [x] `Book`: matching core (limit, market, cancel, partial fills)
+- [ ] `spsc_queue.hpp`: ring buffer plus a two-thread stress test
+- [ ] `protocol.hpp`: wire structs, encode/decode, partial-frame handling; unit tests without sockets
+- [ ] `engine.hpp/.cpp`: driven through its queues in tests, no network; covers id generation, ownership checks, and maker-before-claim
+- [ ] `gateway.hpp/.cpp`: epoll, connection table, routing, writes
+- [ ] `main.cpp` + a load-generator client for end-to-end throughput against the 100k–500k ops/s target
 
 ## License
 
