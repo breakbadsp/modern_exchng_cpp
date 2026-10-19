@@ -22,31 +22,36 @@ if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
         "This compiler is GCC ${CMAKE_CXX_COMPILER_VERSION}.")
 endif()
 
-file(WRITE "${CMAKE_BINARY_DIR}/mex_check_contracts.cpp"
-"int Inc(int x)
-  pre(x >= 0)
+function(mex_check_contracts)
+    file(WRITE "${CMAKE_BINARY_DIR}/mex_check_contracts.cpp"
+"int Inc(int p_x)
+  pre(p_x >= 0)
 {
-  return x + 1;
+  return p_x + 1;
 }
 int main()
 {
   return Inc(0) == 1 ? 0 : 1;
 }
 ")
-execute_process(
-    COMMAND "${CMAKE_CXX_COMPILER}" -std=c++26 -fcontracts
-            "${CMAKE_BINARY_DIR}/mex_check_contracts.cpp"
-            -o "${CMAKE_BINARY_DIR}/mex_check_contracts.bin"
-    RESULT_VARIABLE MEX_CONTRACTS_COMPILE_RESULT
-    OUTPUT_VARIABLE MEX_CONTRACTS_COMPILE_OUT
-    ERROR_VARIABLE MEX_CONTRACTS_COMPILE_ERR
-)
-if(NOT MEX_CONTRACTS_COMPILE_RESULT EQUAL 0)
-    message(FATAL_ERROR
-        "This GCC does not compile C++26 contracts with -fcontracts. "
-        "Use the latest GCC that supports contracts (16+).\n"
-        "${MEX_CONTRACTS_COMPILE_OUT}${MEX_CONTRACTS_COMPILE_ERR}")
-endif()
+    # Use the configured compiler arguments, flags, and toolchain. Require a link
+    # check even when the toolchain uses static libraries for other probes.
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
+    try_compile(MEX_CONTRACTS_COMPILE_RESULT
+        "${CMAKE_BINARY_DIR}/mex_check_contracts"
+        "${CMAKE_BINARY_DIR}/mex_check_contracts.cpp"
+        COMPILE_DEFINITIONS -std=c++26 -fcontracts
+        LINK_OPTIONS -fcontracts
+        OUTPUT_VARIABLE MEX_CONTRACTS_COMPILE_OUTPUT
+    )
+    if(NOT MEX_CONTRACTS_COMPILE_RESULT)
+        message(FATAL_ERROR
+            "This GCC does not compile and link C++26 contracts with -fcontracts. "
+            "Use the latest GCC that supports contracts (16+).\n"
+            "${MEX_CONTRACTS_COMPILE_OUTPUT}")
+    endif()
+endfunction()
+mex_check_contracts()
 
 add_compile_options(-std=c++26 -fcontracts)
 add_link_options(-fcontracts)
