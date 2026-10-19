@@ -191,7 +191,8 @@ template <typename Timing> [[nodiscard]] Result BenchTakeBest()
         {
           const mex::SubmitResult result = Timing::Op(
               samples, i,
-              [&]() {
+              [&]()
+              {
                 return book.SubmitLimitOrder(mex::Side::Buy, mex::Price{1000}, mex::Quantity{1});
               });
           if (result.filled_qty_ != mex::Quantity{1} || result.order_id_ != mex::kInvalidOrderId)
