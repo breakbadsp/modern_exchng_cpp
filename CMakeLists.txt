@@ -74,7 +74,7 @@ if(MEX_SANITIZER_LIST)
     add_link_options(-fsanitize=${MEX_SANITIZER_CSV})
 endif()
 
-add_library(mex STATIC src/book.cpp src/config.cpp src/engine.cpp)
+add_library(mex STATIC src/book.cpp src/config.cpp src/engine.cpp src/gateway.cpp)
 target_include_directories(mex PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
@@ -112,6 +112,10 @@ target_compile_definitions(test_config PRIVATE
     MEX_EXAMPLE_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/config/example.cfg")
 target_compile_options(test_config PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
 
+add_executable(test_gateway tests/gateway_test.cpp)
+target_link_libraries(test_gateway PRIVATE mex GTest::gtest_main Threads::Threads)
+target_compile_options(test_gateway PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+
 # Measure the book itself, not a debug build of it. Last -O flag wins over the Debug preset.
 # ignore drops contract checks so the number is the book, not the assertions.
 add_executable(bench_book tests/book_bench.cpp src/book.cpp)
@@ -125,6 +129,9 @@ add_test(NAME test_spsc_queue COMMAND test_spsc_queue)
 add_test(NAME test_protocol COMMAND test_protocol)
 add_test(NAME test_engine COMMAND test_engine)
 add_test(NAME test_config COMMAND test_config)
+add_test(NAME test_gateway COMMAND test_gateway)
+# Loopback sockets: a lost frame must fail the run, not hang it.
+set_tests_properties(test_gateway PROPERTIES TIMEOUT 120)
 
 find_program(CLANG_FORMAT_EXECUTABLE NAMES clang-format)
 if(CLANG_FORMAT_EXECUTABLE)
@@ -135,6 +142,8 @@ if(CLANG_FORMAT_EXECUTABLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/config.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gateway.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gateway.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/protocol.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/spsc_queue.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/types.hpp
@@ -145,6 +154,7 @@ if(CLANG_FORMAT_EXECUTABLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/engine_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_session_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/gateway_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/spsc_queue_test.cpp
     )

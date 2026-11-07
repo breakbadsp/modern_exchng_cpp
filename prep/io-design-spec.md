@@ -32,7 +32,7 @@ else above matching lives in the Engine.
 | Wire protocol (frame structs, encode/decode) | Done — `src/protocol.hpp` |
 | Config file parser | Done — `src/config.hpp` |
 | Engine (thread loop around `Book`s, order metadata, reports) | Done — `src/engine.hpp` |
-| Gateway (sockets, sessions, framing, routing, writes) | To build |
+| Gateway (sockets, sessions, framing, routing, writes) | Done — `src/gateway.hpp` |
 | `main` + load-generator client | To build |
 
 `Book` is the matching logic only. It does not own a thread, a queue,
@@ -367,6 +367,19 @@ Each step is testable on its own:
 ## Where we are
 
 v1 design locked. Steps 1 (SPSC queue), 2 (`protocol.hpp`), 3
-(`Book::ReduceOrder` / `Book::ReplaceOrder`), 4 (`engine.hpp/.cpp`), and
-5 (`config.hpp/.cpp`) are done. Thread pinning is not in the engine yet;
-it comes with `main`. Next: step 6 (gateway).
+(`Book::ReduceOrder` / `Book::ReplaceOrder`), 4 (`engine.hpp/.cpp`),
+5 (`config.hpp/.cpp`), and 6 (`gateway.hpp/.cpp`) are done. Thread pinning
+is not in the engine or the gateway yet; it comes with `main`. Next: step 7
+(`main` and the load generator).
+
+Gateway choices made in step 6:
+
+- Each connection has a read buffer of 64 and a send buffer of 1024
+  maximum-size frames. When a frame does not fit, the gateway first
+  writes to the socket, so the send buffer only overflows when the kernel
+  socket buffer is also full; then the client is disconnected.
+- LogonAck and LogonReject carry seq 1. A Logon on a connection that is
+  already logged on closes it, as any frame out of order does.
+- A bad side or order type is a malformed frame (the decoder rejects it),
+  so it closes the connection instead of sending a Reject.
+- The gateway busy-polls (`epoll_wait` timeout 0), like the engines.
