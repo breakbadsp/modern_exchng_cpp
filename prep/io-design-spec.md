@@ -33,7 +33,7 @@ else above matching lives in the Engine.
 | Config file parser | Done — `src/config.hpp` |
 | Engine (thread loop around `Book`s, order metadata, reports) | Done — `src/engine.hpp` |
 | Gateway (sockets, sessions, framing, routing, writes) | Done — `src/gateway.hpp` |
-| `main` + load-generator client | To build |
+| `main` + load-generator client | Done — `src/main.cpp`, `tools/loadgen.cpp` |
 
 `Book` is the matching logic only. It does not own a thread, a queue,
 client identities, or outbound messages. The Engine is the thin layer that
@@ -368,9 +368,19 @@ Each step is testable on its own:
 
 v1 design locked. Steps 1 (SPSC queue), 2 (`protocol.hpp`), 3
 (`Book::ReduceOrder` / `Book::ReplaceOrder`), 4 (`engine.hpp/.cpp`),
-5 (`config.hpp/.cpp`), and 6 (`gateway.hpp/.cpp`) are done. Thread pinning
-is not in the engine or the gateway yet; it comes with `main`. Next: step 7
-(`main` and the load generator).
+5 (`config.hpp/.cpp`), 6 (`gateway.hpp/.cpp`), and 7 (`main` and the load
+generator) are done: all v1 steps are built. The measured end-to-end result
+is in [`docs/performance.md`](../docs/performance.md).
+
+Choices made in step 7:
+
+- Each engine thread pins itself to its configured core and then builds its
+  `Engine`, so its `Book`s are first touched there. A pin failure is a
+  warning, so the binary runs on small machines.
+- The gateway runs on its own thread and is not pinned: the config has no
+  gateway core. The main thread waits for SIGINT or SIGTERM.
+- Shutdown stops and joins the engines first, then the gateway, because an
+  engine can spin on a full outbound queue that only the gateway drains.
 
 Gateway choices made in step 6:
 
