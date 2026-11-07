@@ -92,6 +92,12 @@ target_link_libraries(test_book PRIVATE mex GTest::gtest_main)
 target_include_directories(test_book PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_compile_options(test_book PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
 
+find_package(Threads REQUIRED)
+
+add_executable(test_spsc_queue tests/spsc_queue_test.cpp)
+target_link_libraries(test_spsc_queue PRIVATE mex GTest::gtest_main Threads::Threads)
+target_compile_options(test_spsc_queue PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+
 # Measure the book itself, not a debug build of it. Last -O flag wins over the Debug preset.
 # ignore drops contract checks so the number is the book, not the assertions.
 add_executable(bench_book tests/book_bench.cpp src/book.cpp)
@@ -101,18 +107,21 @@ target_compile_options(bench_book PRIVATE -O3 -DNDEBUG -fcontract-evaluation-sem
 
 enable_testing()
 add_test(NAME test_book COMMAND test_book)
+add_test(NAME test_spsc_queue COMMAND test_spsc_queue)
 
 find_program(CLANG_FORMAT_EXECUTABLE NAMES clang-format)
 if(CLANG_FORMAT_EXECUTABLE)
     set(MEX_FORMAT_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/book.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/book.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/spsc_queue.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/types.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/alloc_count_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_bench.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_checks.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_session_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/spsc_queue_test.cpp
     )
     add_custom_target(format
         COMMAND ${CLANG_FORMAT_EXECUTABLE} -i ${MEX_FORMAT_SOURCES}
