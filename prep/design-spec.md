@@ -25,17 +25,15 @@ vs. sorted-vector debate for why this matters).
 
 - Equity asset class only.
 - Order types: **Market and Limit only**. No multi-leg/spread orders.
-- **One symbol per `Book` instance** — assumed throughout the code (no
-  `symbol_id` field anywhere), but never explicitly re-confirmed in so
-  many words. Flagging so it can be corrected if wrong. Multi-symbol
-  routing (how multiple `Book` instances are managed/dispatched to) is
-  undesigned.
+- **One symbol per `Book` instance** (no `symbol_id` field anywhere).
+  Multi-symbol routing (engine threads that each own a set of `Book`s) is
+  locked in [`io-design-spec.md`](io-design-spec.md).
 - **FIFO (price-time) priority** for orders at the same price.
 - **Single-threaded** matching core — no locks, no atomics, no
-  concurrency in v1.
-- v1 operations: **New (limit) order, Cancel, and partial fills.**
-  Modify/price-replace was mentioned once in passing but never resolved
-  — see Open Questions.
+  concurrency inside a `Book`. Each `Book` has exactly one owner thread;
+  threads talk only through SPSC queues (see `io-design-spec.md`).
+- v1 operations: **New order, Cancel, Replace, and partial fills.**
+  Replace semantics are locked in `io-design-spec.md`.
 - Throughput target: **100k–500k+ orders/sec**, single thread.
 
 ## Hard design guidelines (locked)
@@ -166,17 +164,11 @@ array, size ≤ capacity, no reallocation after construct).
   constructor parameters. Need sizing against the throughput target and
   the specific instrument's realistic order-flow depth and distinct
   price-level count.
-- **Policy on `INVALID` rejection** — reject the client order, log,
-  alert? This belongs to the layer above `Book`; not decided.
-- **Modify / price-replace semantics** — mentioned once, unresolved.
-  Real markets usually have a rule about whether a price change loses
-  time priority (typically yes, sometimes not for quantity-decrease-only
-  modifies). Out of the locked v1 scope; needs a decision if/when added.
-- **Client-facing order ID vs. internal `order_id`** — not addressed. A
-  client-supplied identifier (e.g. a FIX ClOrdID) would need its own
-  lookup structure to map to the internal pool index, which would itself
-  need pre-allocating to respect the no-allocation guideline.
-- **Multi-symbol routing** — undesigned (see Scope caveat above).
+- **Resolved in `io-design-spec.md`:** reject policy (client gets
+  `Reject` / `Done`), Replace semantics (priority kept only for a
+  quantity decrease at the same price), client-facing order id
+  (preallocated per-book index keyed by session and `client_order_id`),
+  and multi-symbol routing (engine shards).
 - **Tick size / price scale** — `price` is `int64_t` ticks, but the
   concrete minimum increment (paise, cents, or otherwise) for the target
   instrument hasn't been pinned down.
