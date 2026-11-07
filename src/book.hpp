@@ -78,6 +78,24 @@ public:
   [[nodiscard]] bool CancelOrder(const OrderId p_order_id)
     post (r: !r || (p_order_id < MaxOrders() && Order(p_order_id).quantity_ == Quantity{}));
 
+  // Lowers a resting order's quantity in place. The order keeps its time priority.
+  // Returns false if the order is not resting or p_new_quantity is not below its quantity.
+  // Fills() does not change.
+  [[nodiscard]] bool ReduceOrder(const OrderId p_order_id, const Quantity p_new_quantity)
+    pre (p_new_quantity > Quantity{})
+    post (r: !r || (p_order_id < MaxOrders() && Order(p_order_id).quantity_ == p_new_quantity));
+
+  // Removes a resting order and submits p_new_quantity at p_new_price on the same
+  // side as a new limit order: it loses time priority and can match at once.
+  // The result and Fills() are those of that submit, and it never drops leaves.
+  // Rejected changes nothing: the order is not resting, or the new price needs a
+  // new level and the ladder has no room even after the order is removed.
+  [[nodiscard]] SubmitResult ReplaceOrder(const OrderId p_order_id, Price p_new_price, const Quantity p_new_quantity)
+    pre (p_new_quantity > Quantity{})
+    post (r: r.status_ == SubmitStatus::Rejected ||
+             static_cast<std::uint64_t>(r.filled_qty_.units_) + r.remaining_.units_ == p_new_quantity.units_)
+    post (r: r.status_ == SubmitStatus::Rejected || r.remaining_ == Quantity{} || r.order_id_ != kInvalidOrderId);
+
   [[nodiscard]] const OrderNode &Order(OrderId p_order_id) const
     pre (p_order_id < MaxOrders());
 
@@ -95,6 +113,14 @@ private:
   [[nodiscard]] Quantity Match(Side p_aggressor, const Price *p_limit_price, Quantity p_quantity);
 
   [[nodiscard]] bool CanRest(Side p_side, Price p_price) const;
+
+  [[nodiscard]] bool CanRestAfterRemoving(OrderId p_order_id, Price p_price) const
+    pre (p_order_id < pool_size_);
+
+  [[nodiscard]] bool IsResting(OrderId p_order_id) const;
+
+  [[nodiscard]] std::uint32_t LevelIndex(OrderId p_order_id) const
+    pre (p_order_id < pool_size_);
 
   OrderId Rest(Side p_side, Price p_price, Quantity p_quantity)
     pre (free_count_ > 0)

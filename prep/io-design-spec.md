@@ -27,7 +27,7 @@ else above matching lives in the Engine.
 | Piece | State |
 |---|---|
 | `Book` (matching, resting, cancel, fills) | Done — `src/book.hpp` |
-| `Book` replace operations (`ReduceOrder`, `ReplaceOrder`) | To build |
+| `Book` replace operations (`ReduceOrder`, `ReplaceOrder`) | Done — `src/book.hpp` |
 | SPSC queue | Done — `src/spsc_queue.hpp` |
 | Wire protocol (frame structs, encode/decode) | Done — `src/protocol.hpp` |
 | Config file parser | To build |
@@ -251,11 +251,11 @@ keeps its `client_order_id`.
   once; the engine handles its fills the same way as for a `NewOrder`
   (maker before claim).
 - **No partial change on reject.** `Book::ReplaceOrder` checks before it
-  changes anything. If `new_price` is not an existing level on that side
-  and the ladder is full, it rejects and the original order stays as it
-  was. This check is conservative: it can reject a replace that would have
-  matched fully. The pool cannot be full here, because the removed order
-  frees its own slot.
+  changes anything. If `new_price` needs a new level on that side and the
+  ladder has no room even after the order leaves its own level, it rejects
+  and the original order stays as it was. This check can reject a replace
+  that would have matched fully. The pool cannot be full here, because the
+  removed order frees its own slot.
 - A replaced order that rests in a new slot keeps the same
   `client_order_id`, `owner_`, and `cum_qty_`; the index entry moves to
   the new slot. The new slot has a new `generation_`, so the
@@ -347,5 +347,6 @@ Each step is testable on its own:
 
 ## Where we are
 
-v1 design locked. Steps 1 (SPSC queue) and 2 (`protocol.hpp`) are
-done. Next: step 3 (`Book::ReduceOrder` / `Book::ReplaceOrder`).
+v1 design locked. Steps 1 (SPSC queue), 2 (`protocol.hpp`), and 3
+(`Book::ReduceOrder` / `Book::ReplaceOrder`) are done. Next: step 4
+(`engine.hpp/.cpp`).
