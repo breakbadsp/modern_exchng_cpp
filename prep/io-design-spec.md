@@ -29,7 +29,7 @@ else above matching lives in the Engine.
 | `Book` (matching, resting, cancel, fills) | Done — `src/book.hpp` |
 | `Book` replace operations (`ReduceOrder`, `ReplaceOrder`) | To build |
 | SPSC queue | Done — `src/spsc_queue.hpp` |
-| Wire protocol (frame structs, encode/decode) | To build |
+| Wire protocol (frame structs, encode/decode) | Done — `src/protocol.hpp` |
 | Config file parser | To build |
 | Engine (thread loop around `Book`s, order metadata, reports) | To build |
 | Gateway (sockets, sessions, framing, routing, writes) | To build |
@@ -136,7 +136,7 @@ wire.
 | Client → Exchange | Exchange → Client |
 |---|---|
 | `Logon{session_name, token}` | `LogonAck` / `LogonReject{reason}` |
-| `NewOrder{client_order_id u64, symbol_id u32, side, type, price i64, qty u32}` | `Ack{client_order_id, exchange_order_id, leaves}` |
+| `NewOrder{client_order_id u64, symbol_id u32, side, type, price i64, qty u32}` | `Ack{client_order_id, symbol_id, exchange_order_id, leaves}` |
 | `Cancel{client_order_id, symbol_id}` | `Reject{client_order_id, reason}` |
 | `Replace{client_order_id, symbol_id, new_price i64, new_total_qty u32}` | `Fill{exchange_order_id, client_order_id, price, qty, leaves, liquidity}` |
 | | `CancelAck` / `CancelReject{reason}` |
@@ -146,6 +146,10 @@ wire.
 - Every exchange → client frame carries a `u64 seq`. It starts at 1 on
   each logon and increases by 1 for each frame to that session. It lets
   the client detect a gap. There is **no resend** in v1.
+- Every order report (`Ack`, `Reject`, `Fill`, `CancelAck`,
+  `CancelReject`, `ReplaceAck`, `ReplaceReject`, `Done`) also carries
+  `symbol_id`. A `client_order_id` is unique only per session per
+  symbol, so without it a report can be ambiguous.
 - `exchange_order_id` is informational in v1. Cancel and Replace use
   `client_order_id` (see below).
 
@@ -343,5 +347,5 @@ Each step is testable on its own:
 
 ## Where we are
 
-v1 design locked. Step 1 (SPSC queue) is done. Next: step 2
-(`protocol.hpp`).
+v1 design locked. Steps 1 (SPSC queue) and 2 (`protocol.hpp`) are
+done. Next: step 3 (`Book::ReduceOrder` / `Book::ReplaceOrder`).
