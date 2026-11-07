@@ -74,7 +74,7 @@ if(MEX_SANITIZER_LIST)
     add_link_options(-fsanitize=${MEX_SANITIZER_CSV})
 endif()
 
-add_library(mex STATIC src/book.cpp)
+add_library(mex STATIC src/book.cpp src/engine.cpp)
 target_include_directories(mex PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
@@ -102,6 +102,10 @@ add_executable(test_protocol tests/protocol_test.cpp)
 target_link_libraries(test_protocol PRIVATE mex GTest::gtest_main)
 target_compile_options(test_protocol PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
 
+add_executable(test_engine tests/engine_test.cpp)
+target_link_libraries(test_engine PRIVATE mex GTest::gtest_main Threads::Threads)
+target_compile_options(test_engine PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+
 # Measure the book itself, not a debug build of it. Last -O flag wins over the Debug preset.
 # ignore drops contract checks so the number is the book, not the assertions.
 add_executable(bench_book tests/book_bench.cpp src/book.cpp)
@@ -113,12 +117,15 @@ enable_testing()
 add_test(NAME test_book COMMAND test_book)
 add_test(NAME test_spsc_queue COMMAND test_spsc_queue)
 add_test(NAME test_protocol COMMAND test_protocol)
+add_test(NAME test_engine COMMAND test_engine)
 
 find_program(CLANG_FORMAT_EXECUTABLE NAMES clang-format)
 if(CLANG_FORMAT_EXECUTABLE)
     set(MEX_FORMAT_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/book.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/book.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/engine.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/protocol.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/spsc_queue.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/types.hpp
@@ -126,6 +133,7 @@ if(CLANG_FORMAT_EXECUTABLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_bench.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_checks.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/engine_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_session_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/spsc_queue_test.cpp
