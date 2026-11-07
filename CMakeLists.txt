@@ -123,6 +123,21 @@ target_include_directories(bench_book PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(bench_book PRIVATE -O3 -DNDEBUG -fcontract-evaluation-semantic=ignore
     -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
 
+# The exchange and the load generator are measured end to end, so they build at
+# -O3 like bench_book. The exchange compiles the sources itself, because mex is
+# built with the preset's flags. Contracts stay on in the exchange.
+add_executable(mex_exchange src/main.cpp src/book.cpp src/config.cpp src/engine.cpp
+    src/gateway.cpp)
+target_include_directories(mex_exchange PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mex_exchange PRIVATE Threads::Threads)
+target_compile_options(mex_exchange PRIVATE -O3 -DNDEBUG
+    -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+
+add_executable(mex_loadgen tools/loadgen.cpp)
+target_link_libraries(mex_loadgen PRIVATE mex Threads::Threads)
+target_compile_options(mex_loadgen PRIVATE -O3 -DNDEBUG
+    -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+
 enable_testing()
 add_test(NAME test_book COMMAND test_book)
 add_test(NAME test_spsc_queue COMMAND test_spsc_queue)
@@ -132,6 +147,12 @@ add_test(NAME test_config COMMAND test_config)
 add_test(NAME test_gateway COMMAND test_gateway)
 # Loopback sockets: a lost frame must fail the run, not hang it.
 set_tests_properties(test_gateway PROPERTIES TIMEOUT 120)
+add_test(NAME exchange_smoke
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_smoke_test.sh
+        $<TARGET_FILE:mex_exchange> $<TARGET_FILE:mex_loadgen>
+        ${CMAKE_CURRENT_SOURCE_DIR}/config/example.cfg
+        ${CMAKE_CURRENT_BINARY_DIR}/exchange_smoke)
+set_tests_properties(exchange_smoke PROPERTIES TIMEOUT 60)
 
 find_program(CLANG_FORMAT_EXECUTABLE NAMES clang-format)
 if(CLANG_FORMAT_EXECUTABLE)
@@ -144,6 +165,7 @@ if(CLANG_FORMAT_EXECUTABLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/gateway.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/gateway.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/protocol.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/spsc_queue.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/types.hpp
@@ -157,6 +179,7 @@ if(CLANG_FORMAT_EXECUTABLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/gateway_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/spsc_queue_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/loadgen.cpp
     )
     add_custom_target(format
         COMMAND ${CLANG_FORMAT_EXECUTABLE} -i ${MEX_FORMAT_SOURCES}
