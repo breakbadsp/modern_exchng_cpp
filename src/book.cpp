@@ -331,22 +331,14 @@ SubmitResult Book::SubmitMarketOrder(Side p_side, const Quantity p_quantity)
 
 bool Book::CancelOrder(const OrderId p_order_id)
 {
-  if (p_order_id >= pool_size_)
+  if (!IsResting(p_order_id))
   {
     return false;
   }
 
   OrderNode &node = pool_[p_order_id];
-  if (node.quantity_ == Quantity{})
-  {
-    return false;
-  }
-
   PriceLadder &levels = Levels(node.side_);
-  const std::uint32_t index = FindLevel(levels.begin(), static_cast<std::uint32_t>(levels.size()),
-                                        node.price_, Ascending(node.side_));
-  contract_assert(index < levels.size());
-  contract_assert(levels[index].price_ == node.price_);
+  const std::uint32_t index = LevelIndex(p_order_id);
   PriceLevel &level = levels[index];
   contract_assert(level.total_qty_ >= node.quantity_.units_);
   Unlink(level, p_order_id);
@@ -361,6 +353,44 @@ bool Book::CancelOrder(const OrderId p_order_id)
     levels.Erase(index);
   }
   return true;
+}
+
+bool Book::ReduceOrder(const OrderId p_order_id, const Quantity p_new_quantity)
+{
+  if (!IsResting(p_order_id))
+  {
+    return false;
+  }
+  OrderNode &node = pool_[p_order_id];
+  if (p_new_quantity >= node.quantity_)
+  {
+    return false;
+  }
+
+  PriceLevel &level = Levels(node.side_)[LevelIndex(p_order_id)];
+  const Quantity removed = node.quantity_ - p_new_quantity;
+  contract_assert(level.total_qty_ > removed.units_);
+  level.total_qty_ -= removed.units_;
+  node.quantity_ = p_new_quantity;
+  return true;
+}
+
+SubmitResult Book::ReplaceOrder(const OrderId p_order_id, Price p_new_price,
+                                const Quantity p_new_quantity)
+{
+  ClearFills();
+  // Check everything before the book changes, so a reject leaves the order as it was.
+  if (!IsResting(p_order_id) || !CanRestAfterRemoving(p_order_id, p_new_price))
+  {
+    return Rejected(p_new_quantity);
+  }
+
+  const Side side = pool_[p_order_id].side_;
+  [[maybe_unused]] const bool cancelled = CancelOrder(p_order_id);
+  contract_assert(cancelled);
+  const SubmitResult result = SubmitLimitOrder(side, p_new_price, p_new_quantity);
+  contract_assert(result.status_ == SubmitStatus::Accepted);
+  return result;
 }
 
 const OrderNode &Book::Order(OrderId p_order_id) const { return pool_[p_order_id]; }
@@ -433,6 +463,45 @@ bool Book::CanRest(Side p_side, Price p_price) const
     return true;
   }
   return levels.size() < static_cast<std::size_t>(max_price_levels_);
+}
+
+// Exact, not conservative: matching only removes levels on the other side, so the
+// only change to this side before the rest is the removal of p_order_id itself.
+// The pool has room, because the removal frees a slot.
+bool Book::CanRestAfterRemoving(OrderId p_order_id, Price p_price) const
+{
+  const OrderNode &node = pool_[p_order_id];
+  if (node.price_ == p_price)
+  {
+    // Its level stays, or it goes and frees the room to come back.
+    return true;
+  }
+  const PriceLadder &levels = Levels(node.side_);
+  const std::uint32_t index = FindLevel(levels.begin(), static_cast<std::uint32_t>(levels.size()),
+                                        p_price, Ascending(node.side_));
+  if (index < levels.size() && levels[index].price_ == p_price)
+  {
+    return true;
+  }
+  const bool frees_own_level = levels[LevelIndex(p_order_id)].order_count_ == 1;
+  const std::size_t size_after = levels.size() - (frees_own_level ? 1 : 0);
+  return size_after < static_cast<std::size_t>(max_price_levels_);
+}
+
+bool Book::IsResting(OrderId p_order_id) const
+{
+  return p_order_id < pool_size_ && pool_[p_order_id].quantity_ > Quantity{};
+}
+
+std::uint32_t Book::LevelIndex(OrderId p_order_id) const
+{
+  const OrderNode &node = pool_[p_order_id];
+  const PriceLadder &levels = Levels(node.side_);
+  const std::uint32_t index = FindLevel(levels.begin(), static_cast<std::uint32_t>(levels.size()),
+                                        node.price_, Ascending(node.side_));
+  contract_assert(index < levels.size());
+  contract_assert(levels[index].price_ == node.price_);
+  return index;
 }
 
 OrderId Book::Rest(Side p_side, Price p_price, Quantity p_quantity)

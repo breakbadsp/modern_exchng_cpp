@@ -717,4 +717,158 @@ TEST(Fills, OneMarketOrderCanFillEveryRestingSlot)
   EXPECT_EQ(book.FreeSlotCount(), kOrders);
 }
 
+TEST(Replace, ReduceKeepsTimePriority)
+{
+  mex::Book book(4, 2);
+  FillLog log;
+  const mex::SubmitResult first = SubmitLimit(book, log, mex::Side::Buy, 100, 10);
+  const mex::SubmitResult second = SubmitLimit(book, log, mex::Side::Buy, 100, 10);
+
+  ASSERT_TRUE(book.ReduceOrder(first.order_id_, mex::Quantity{4}));
+  EXPECT_EQ(book.Bids().back().total_qty_, 14u);
+  ExpectBookInvariants(book);
+
+  ExpectTrade(SubmitLimit(book, log, mex::Side::Sell, 100, 5), 5, 0, false);
+  ASSERT_EQ(log.Records().size(), std::size_t{2});
+  ExpectFill(log.Records()[0], first.order_id_, 100, 4);
+  ExpectFill(log.Records()[1], second.order_id_, 100, 1);
+  ExpectBookInvariants(book);
+}
+
+TEST(Replace, ReduceRejectsNoReductionAndOrdersNotResting)
+{
+  mex::Book book(2, 2);
+  FillLog log;
+  const mex::SubmitResult order = SubmitLimit(book, log, mex::Side::Sell, 100, 5);
+
+  EXPECT_FALSE(book.ReduceOrder(order.order_id_, mex::Quantity{5}));
+  EXPECT_FALSE(book.ReduceOrder(order.order_id_, mex::Quantity{6}));
+  EXPECT_FALSE(book.ReduceOrder(mex::kInvalidOrderId, mex::Quantity{1}));
+  ASSERT_TRUE(book.CancelOrder(order.order_id_));
+  EXPECT_FALSE(book.ReduceOrder(order.order_id_, mex::Quantity{1}));
+  EXPECT_TRUE(book.Asks().empty());
+  ExpectBookInvariants(book);
+}
+
+TEST(Replace, SamePriceIncreaseLosesTimePriority)
+{
+  mex::Book book(4, 2);
+  FillLog log;
+  const mex::SubmitResult first = SubmitLimit(book, log, mex::Side::Buy, 100, 10);
+  const mex::SubmitResult second = SubmitLimit(book, log, mex::Side::Buy, 100, 10);
+
+  const mex::SubmitResult replaced =
+      book.ReplaceOrder(first.order_id_, mex::Price{100}, mex::Quantity{12});
+  ExpectResting(replaced, 12);
+  EXPECT_EQ(book.Bids().back().total_qty_, 22u);
+  ExpectBookInvariants(book);
+
+  ExpectTrade(SubmitLimit(book, log, mex::Side::Sell, 100, 11), 11, 0, false);
+  ASSERT_EQ(log.Records().size(), std::size_t{2});
+  ExpectFill(log.Records()[0], second.order_id_, 100, 10);
+  ExpectFill(log.Records()[1], replaced.order_id_, 100, 1);
+}
+
+TEST(Replace, NewPriceCanMatchAtOnceAndRestTheRest)
+{
+  mex::Book book(4, 3);
+  FillLog log;
+  const mex::SubmitResult ask = SubmitLimit(book, log, mex::Side::Sell, 101, 3);
+  const mex::SubmitResult bid = SubmitLimit(book, log, mex::Side::Buy, 99, 5);
+
+  const mex::SubmitResult replaced =
+      book.ReplaceOrder(bid.order_id_, mex::Price{101}, mex::Quantity{5});
+
+  ExpectTrade(replaced, 3, 2, true);
+  ASSERT_EQ(book.Fills().size(), std::size_t{1});
+  ExpectFill(book.Fills()[0], ask.order_id_, 101, 3);
+  EXPECT_TRUE(book.Asks().empty());
+  ASSERT_EQ(book.Bids().size(), std::size_t{1});
+  EXPECT_EQ(book.Bids().back().price_, mex::Price{101});
+  EXPECT_EQ(book.Order(replaced.order_id_).quantity_, mex::Quantity{2});
+  ExpectBookInvariants(book);
+}
+
+TEST(Replace, FullMatchLeavesNothingResting)
+{
+  mex::Book book(4, 2);
+  FillLog log;
+  SubmitLimit(book, log, mex::Side::Buy, 99, 4);
+  const mex::SubmitResult ask = SubmitLimit(book, log, mex::Side::Sell, 101, 4);
+
+  const mex::SubmitResult replaced =
+      book.ReplaceOrder(ask.order_id_, mex::Price{98}, mex::Quantity{4});
+
+  ExpectTrade(replaced, 4, 0, false);
+  EXPECT_TRUE(book.Bids().empty());
+  EXPECT_TRUE(book.Asks().empty());
+  EXPECT_EQ(book.FreeSlotCount(), 4u);
+  ExpectBookInvariants(book);
+}
+
+TEST(Replace, RejectsWithoutChangeWhenTheNewLevelCannotFit)
+{
+  mex::Book book(4, 2);
+  FillLog log;
+  const mex::SubmitResult moving = SubmitLimit(book, log, mex::Side::Buy, 100, 5);
+  SubmitLimit(book, log, mex::Side::Buy, 100, 6);
+  SubmitLimit(book, log, mex::Side::Buy, 99, 7);
+  SubmitLimit(book, log, mex::Side::Sell, 105, 1);
+
+  const mex::SubmitResult replaced =
+      book.ReplaceOrder(moving.order_id_, mex::Price{98}, mex::Quantity{5});
+
+  ExpectRejected(replaced, 5);
+  EXPECT_TRUE(book.Fills().empty());
+  EXPECT_EQ(book.Order(moving.order_id_).quantity_, mex::Quantity{5});
+  EXPECT_EQ(book.Bids().back().head_, moving.order_id_);
+  EXPECT_EQ(book.Bids().back().total_qty_, 11u);
+  EXPECT_EQ(book.FreeSlotCount(), 0u);
+  ExpectBookInvariants(book);
+}
+
+TEST(Replace, FullLadderAllowsAMoveThatFreesTheOwnLevel)
+{
+  mex::Book book(4, 2);
+  FillLog log;
+  const mex::SubmitResult alone = SubmitLimit(book, log, mex::Side::Buy, 100, 5);
+  SubmitLimit(book, log, mex::Side::Buy, 99, 7);
+
+  const mex::SubmitResult replaced =
+      book.ReplaceOrder(alone.order_id_, mex::Price{98}, mex::Quantity{5});
+
+  ExpectResting(replaced, 5);
+  ASSERT_EQ(book.Bids().size(), std::size_t{2});
+  EXPECT_EQ(book.Bids().front().price_, mex::Price{98});
+  EXPECT_EQ(book.Bids().back().price_, mex::Price{99});
+  ExpectBookInvariants(book);
+}
+
+TEST(Replace, RejectsAnOrderThatIsNotResting)
+{
+  mex::Book book(2, 2);
+  FillLog log;
+  const mex::SubmitResult order = SubmitLimit(book, log, mex::Side::Buy, 100, 5);
+  ASSERT_TRUE(book.CancelOrder(order.order_id_));
+
+  ExpectRejected(book.ReplaceOrder(order.order_id_, mex::Price{100}, mex::Quantity{5}), 5);
+  ExpectRejected(book.ReplaceOrder(mex::kInvalidOrderId, mex::Price{100}, mex::Quantity{5}), 5);
+  EXPECT_EQ(book.FreeSlotCount(), 2u);
+}
+
+// The removed order frees its slot first, so the replacement can rest in the same slot.
+TEST(Replace, NewRestingOrderCanReuseTheOldSlot)
+{
+  mex::Book book(2, 2);
+  FillLog log;
+  const mex::SubmitResult order = SubmitLimit(book, log, mex::Side::Sell, 100, 5);
+
+  const mex::SubmitResult replaced =
+      book.ReplaceOrder(order.order_id_, mex::Price{101}, mex::Quantity{5});
+
+  ExpectResting(replaced, 5);
+  EXPECT_EQ(replaced.order_id_, order.order_id_);
+  EXPECT_EQ(book.Order(replaced.order_id_).price_, mex::Price{101});
+}
+
 } // namespace

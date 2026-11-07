@@ -85,8 +85,7 @@ public:
 
   [[nodiscard]] bool Cancel(mex::OrderId p_order_id)
   {
-    if (p_order_id == mex::kInvalidOrderId || p_order_id >= orders_.size() ||
-        !orders_[p_order_id].live_)
+    if (!IsLive(p_order_id))
     {
       return false;
     }
@@ -105,6 +104,40 @@ public:
     order.quantity_ = mex::Quantity{};
     ++free_slots_;
     return true;
+  }
+
+  [[nodiscard]] bool Reduce(mex::OrderId p_order_id, mex::Quantity p_new_quantity)
+  {
+    if (!IsLive(p_order_id) || p_new_quantity >= orders_[p_order_id].quantity_)
+    {
+      return false;
+    }
+    orders_[p_order_id].quantity_ = p_new_quantity;
+    return true;
+  }
+
+  // Cancel, then a new limit order on the same side. Rejected when the new price
+  // needs a level that does not fit even after the order leaves its own level.
+  [[nodiscard]] mex::SubmitResult Replace(mex::OrderId p_order_id, mex::Price p_new_price,
+                                          mex::Quantity p_new_quantity)
+  {
+    trades_.clear();
+    if (!IsLive(p_order_id))
+    {
+      return Rejected(p_new_quantity);
+    }
+    const Order order = orders_[p_order_id];
+    const auto &levels = Levels(order.side_);
+    const bool own_level_goes = levels.at(order.price_).size() == 1;
+    const bool fits = order.price_ == p_new_price || levels.contains(p_new_price) ||
+                      levels.size() - (own_level_goes ? 1 : 0) < max_price_levels_;
+    if (!fits)
+    {
+      return Rejected(p_new_quantity);
+    }
+    const bool cancelled = Cancel(p_order_id);
+    EXPECT_TRUE(cancelled);
+    return SubmitLimit(order.side_, p_new_price, p_new_quantity);
   }
 
   [[nodiscard]] const std::vector<Trade> &Trades() const { return trades_; }
@@ -140,6 +173,12 @@ private:
   };
 
   using Queue = std::deque<mex::OrderId>;
+
+  [[nodiscard]] bool IsLive(mex::OrderId p_order_id) const
+  {
+    return p_order_id != mex::kInvalidOrderId && p_order_id < orders_.size() &&
+           orders_[p_order_id].live_;
+  }
 
   [[nodiscard]] std::map<mex::Price, Queue> &Levels(mex::Side p_side)
   {
@@ -357,6 +396,44 @@ public:
     return SameBook();
   }
 
+  // Reduces the live order to a random smaller quantity, or skips it if it has 1 left.
+  [[nodiscard]] bool ReduceAt(std::size_t p_live_index, std::uint32_t p_seed)
+  {
+    const Live order = live_.at(p_live_index);
+    const std::uint32_t current = book_.Order(order.book_id_).quantity_.units_;
+    if (current == 1)
+    {
+      return true;
+    }
+    const mex::Quantity smaller{1 + p_seed % (current - 1)};
+    const bool book_reduced = book_.ReduceOrder(order.book_id_, smaller);
+    const bool shadow_reduced = shadow_.Reduce(order.shadow_id_, smaller);
+    if (!book_reduced || !shadow_reduced)
+    {
+      ADD_FAILURE() << "step " << step_ << " reduce " << book_reduced << " vs " << shadow_reduced;
+      return false;
+    }
+    return SameBook();
+  }
+
+  [[nodiscard]] bool ReplaceAt(std::size_t p_live_index, std::int64_t p_price,
+                               std::uint32_t p_quantity)
+  {
+    const Live order = live_.at(p_live_index);
+    const mex::Price price{p_price};
+    const mex::Quantity quantity{p_quantity};
+    return Apply([&] { return book_.ReplaceOrder(order.book_id_, price, quantity); },
+                 [&] { return shadow_.Replace(order.shadow_id_, price, quantity); },
+                 [&](mex::SubmitResult p_result)
+                 {
+                   if (p_result.status_ == mex::SubmitStatus::Accepted)
+                   {
+                     std::erase_if(live_, [&order](Live p_live)
+                                   { return p_live.book_id_ == order.book_id_; });
+                   }
+                 });
+  }
+
   [[nodiscard]] bool CancelAll()
   {
     while (!live_.empty())
@@ -388,14 +465,32 @@ private:
   [[nodiscard]] bool Submit(bool p_market, mex::Side p_side, std::int64_t p_price,
                             std::uint32_t p_quantity)
   {
+    const mex::Price price{p_price};
+    const mex::Quantity quantity{p_quantity};
+    return Apply(
+        [&]
+        {
+          return p_market ? book_.SubmitMarketOrder(p_side, quantity)
+                          : book_.SubmitLimitOrder(p_side, price, quantity);
+        },
+        [&]
+        {
+          return p_market ? shadow_.SubmitMarket(p_side, quantity)
+                          : shadow_.SubmitLimit(p_side, price, quantity);
+        },
+        [](mex::SubmitResult) {});
+  }
+
+  // Runs one operation on both books and compares results, trades, and books.
+  // p_on_accept runs before live_ drops filled makers and adds the new order,
+  // because a new resting order can reuse the slot of an order it replaced.
+  template <typename BookOp, typename ShadowOp, typename OnAccept>
+  [[nodiscard]] bool Apply(BookOp p_book_op, ShadowOp p_shadow_op, OnAccept p_on_accept)
+  {
     trades_.clear();
     filled_ids_.clear();
 
-    const mex::Price price{p_price};
-    const mex::Quantity quantity{p_quantity};
-    const mex::SubmitResult book_result = p_market
-                                              ? book_.SubmitMarketOrder(p_side, quantity)
-                                              : book_.SubmitLimitOrder(p_side, price, quantity);
+    const mex::SubmitResult book_result = p_book_op();
     for (const mex::Fill &fill : book_.Fills())
     {
       trades_.push_back(Trade{fill.price_, fill.quantity_});
@@ -404,13 +499,13 @@ private:
         filled_ids_.push_back(fill.maker_id_);
       }
     }
-    const mex::SubmitResult shadow_result = p_market ? shadow_.SubmitMarket(p_side, quantity)
-                                                     : shadow_.SubmitLimit(p_side, price, quantity);
+    const mex::SubmitResult shadow_result = p_shadow_op();
     if (!SameResult(book_result, shadow_result) || !SameTrades() || !SameBook())
     {
       return false;
     }
 
+    p_on_accept(book_result);
     live_.erase(std::remove_if(live_.begin(), live_.end(),
                                [this](Live p_order)
                                {
@@ -664,6 +759,54 @@ TEST(ExchangeSession, FiveHundredSeededSubmitCancelSequencesMatch)
       {
         std::uniform_int_distribution<std::size_t> pick(0, session.LiveCount() - 1);
         ASSERT_TRUE(session.CancelAt(pick(rng)));
+      }
+    }
+    session.SetStep(kSteps);
+    ASSERT_TRUE(session.CancelAll());
+  }
+}
+
+TEST(ExchangeSession, FiveHundredSeededSequencesWithReplaceAndReduceMatch)
+{
+  constexpr int kSequences = 512;
+  constexpr int kSteps = 64;
+
+  for (int seq = 0; seq < kSequences; ++seq)
+  {
+    const std::uint32_t seed = 5000u + static_cast<std::uint32_t>(seq);
+    SCOPED_TRACE(seed);
+    Session session(24, 6);
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> action(0, 99);
+    std::uniform_int_distribution<int> price_dist(0, 8);
+    std::uniform_int_distribution<int> qty_dist(1, 6);
+    std::uniform_int_distribution<int> side_bit(0, 1);
+
+    for (int step = 0; step < kSteps; ++step)
+    {
+      session.SetStep(step);
+      const mex::Side side = side_bit(rng) == 0 ? mex::Side::Buy : mex::Side::Sell;
+      const int roll = action(rng);
+      if (roll < 50 || session.LiveCount() == 0)
+      {
+        ASSERT_TRUE(
+            session.Limit(side, price_dist(rng), static_cast<std::uint32_t>(qty_dist(rng))));
+        continue;
+      }
+      std::uniform_int_distribution<std::size_t> pick(0, session.LiveCount() - 1);
+      const std::size_t index = pick(rng);
+      if (roll < 65)
+      {
+        ASSERT_TRUE(session.CancelAt(index));
+      }
+      else if (roll < 80)
+      {
+        ASSERT_TRUE(session.ReduceAt(index, static_cast<std::uint32_t>(rng())));
+      }
+      else
+      {
+        ASSERT_TRUE(
+            session.ReplaceAt(index, price_dist(rng), static_cast<std::uint32_t>(qty_dist(rng))));
       }
     }
     session.SetStep(kSteps);
