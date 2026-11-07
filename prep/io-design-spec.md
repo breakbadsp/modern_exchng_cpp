@@ -28,7 +28,7 @@ else above matching lives in the Engine.
 |---|---|
 | `Book` (matching, resting, cancel, fills) | Done — `src/book.hpp` |
 | `Book` replace operations (`ReduceOrder`, `ReplaceOrder`) | To build |
-| SPSC queue | To build |
+| SPSC queue | Done — `src/spsc_queue.hpp` |
 | Wire protocol (frame structs, encode/decode) | To build |
 | Config file parser | To build |
 | Engine (thread loop around `Book`s, order metadata, reports) | To build |
@@ -343,5 +343,5 @@ Each step is testable on its own:
 
 ## Where we are
 
-v1 design locked. Nothing in this document is implemented yet. Next:
-step 1 (SPSC queue).
+v1 design locked. Step 1 (SPSC queue) is done. Next: step 2
+(`protocol.hpp`).
