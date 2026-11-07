@@ -1,4 +1,5 @@
 #include "book.hpp"
+#include "engine.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -6,6 +7,9 @@
 #include <cstdlib>
 #include <gtest/gtest.h>
 #include <new>
+#include <optional>
+#include <span>
+#include <variant>
 #include <vector>
 
 namespace
@@ -236,4 +240,69 @@ TEST(AllocCount, TwoMillionMixedOpsDoNotCallOperatorNew)
   // The workload must actually match, or this test says nothing about the fill buffer.
   EXPECT_GT(crossing_submits, std::uint64_t{100000});
   EXPECT_GT(fills_seen, std::uint64_t{100000});
+}
+
+TEST(AllocCount, EngineCommandsDoNotCallOperatorNew)
+{
+  constexpr std::uint32_t kOps = 200000;
+  const mex::BookConfig config{.symbol_id_ = 1, .max_orders_ = 256, .max_price_levels_ = 32};
+  mex::SpscQueue<mex::Command> inbound{1024};
+  mex::SpscQueue<mex::Report> outbound{1024};
+  mex::Engine engine{std::span<const mex::BookConfig>{&config, 1}, inbound, outbound};
+
+  std::uint64_t state = 0x1234cafef00dULL;
+  auto next = [&state]()
+  {
+    state ^= state << 7U;
+    state ^= state >> 9U;
+    state ^= state << 8U;
+    return state;
+  };
+  std::uint64_t fills = 0;
+
+  g_new_calls.store(0, std::memory_order_relaxed);
+  g_count_news.store(true, std::memory_order_relaxed);
+
+  for (std::uint32_t i = 0; i < kOps; ++i)
+  {
+    // Small id space per session, so duplicates, unknown ids, and replaces all occur.
+    mex::Command command{.session_id_ = static_cast<mex::SessionId>(next() % 2U)};
+    const mex::wire::ClientOrderId id = next() % 128U;
+    const mex::Price price{static_cast<std::int64_t>(100 + next() % 16U)};
+    const mex::Quantity qty{static_cast<std::uint32_t>(1 + next() % 8U)};
+    const std::uint64_t pick = next() % 10U;
+    if (pick < 6U)
+    {
+      command.order_ = mex::wire::NewOrder{
+          .client_order_id_ = id,
+          .symbol_id_ = 1,
+          .side_ = (next() & 1U) == 0U ? mex::Side::Buy : mex::Side::Sell,
+          .type_ = pick == 0U ? mex::wire::OrderType::Market : mex::wire::OrderType::Limit,
+          .price_ = price,
+          .qty_ = qty};
+    }
+    else if (pick < 8U)
+    {
+      command.order_ = mex::wire::Cancel{.client_order_id_ = id, .symbol_id_ = 1};
+    }
+    else
+    {
+      command.order_ = mex::wire::Replace{
+          .client_order_id_ = id, .symbol_id_ = 1, .new_price_ = price, .new_total_qty_ = qty};
+    }
+    if (!inbound.TryPush(command) || !engine.ProcessOne())
+    {
+      g_count_news.store(false, std::memory_order_relaxed);
+      FAIL() << "command " << i << " was not processed";
+    }
+    while (const std::optional<mex::Report> report = outbound.TryPop())
+    {
+      fills += std::holds_alternative<mex::wire::Fill>(report->report_) ? 1U : 0U;
+    }
+  }
+
+  g_count_news.store(false, std::memory_order_relaxed);
+  const std::uint64_t news = g_new_calls.load(std::memory_order_relaxed);
+  EXPECT_EQ(news, 0u) << "operator new called " << news << " times after Engine construction";
+  EXPECT_GT(fills, std::uint64_t{10000});
 }

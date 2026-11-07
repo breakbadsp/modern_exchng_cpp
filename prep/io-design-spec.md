@@ -31,7 +31,7 @@ else above matching lives in the Engine.
 | SPSC queue | Done — `src/spsc_queue.hpp` |
 | Wire protocol (frame structs, encode/decode) | Done — `src/protocol.hpp` |
 | Config file parser | To build |
-| Engine (thread loop around `Book`s, order metadata, reports) | To build |
+| Engine (thread loop around `Book`s, order metadata, reports) | Done — `src/engine.hpp` |
 | Gateway (sockets, sessions, framing, routing, writes) | To build |
 | `main` + load-generator client | To build |
 
@@ -347,6 +347,7 @@ Each step is testable on its own:
 
 ## Where we are
 
-v1 design locked. Steps 1 (SPSC queue), 2 (`protocol.hpp`), and 3
-(`Book::ReduceOrder` / `Book::ReplaceOrder`) are done. Next: step 4
-(`engine.hpp/.cpp`).
+v1 design locked. Steps 1 (SPSC queue), 2 (`protocol.hpp`), 3
+(`Book::ReduceOrder` / `Book::ReplaceOrder`), and 4 (`engine.hpp/.cpp`)
+are done. Thread pinning is not in the engine yet; it comes with `main`.
+Next: step 5 (config parser).
