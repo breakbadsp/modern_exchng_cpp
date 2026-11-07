@@ -30,7 +30,7 @@ else above matching lives in the Engine.
 | `Book` replace operations (`ReduceOrder`, `ReplaceOrder`) | Done — `src/book.hpp` |
 | SPSC queue | Done — `src/spsc_queue.hpp` |
 | Wire protocol (frame structs, encode/decode) | Done — `src/protocol.hpp` |
-| Config file parser | To build |
+| Config file parser | Done — `src/config.hpp` |
 | Engine (thread loop around `Book`s, order metadata, reports) | Done — `src/engine.hpp` |
 | Gateway (sockets, sessions, framing, routing, writes) | To build |
 | `main` + load-generator client | To build |
@@ -295,16 +295,35 @@ Exceeding any of them is an explicit reject or disconnect, consistent with
 ## Configuration (locked)
 
 One plain-text, line-based file, read once at startup by a small parser
-of our own (no new dependency). It holds:
+of our own (no new dependency): `ParseConfig(std::string_view)` and
+`LoadConfig(path)` in `src/config.hpp`. One record per line, fields
+separated by blanks. A line that starts with `#` is a comment; blank
+lines are ignored. `config/example.cfg` is a full example.
 
-- Engines: count and the core to pin each one to.
-- Symbols: `symbol_id`, engine index, `max_orders`, `max_price_levels`,
-  `min_price`, `max_price` (ticks).
-- Sessions: `session_name`, `token`.
-- Gateway: listen address and port, `max_connections`, queue capacities.
+```
+engine <core>
+symbol <symbol_id> <engine> <max_orders> <max_price_levels> <min_price> <max_price>
+session <session_name> <token>
+gateway address <ipv4>
+gateway port <port>
+gateway max_connections <n>
+gateway inbound_queue_capacity <n>
+gateway outbound_queue_capacity <n>
+```
 
-A bad config stops startup with a clear error. Nothing is read after
-startup.
+- The engine index and the `SessionId` are the order of their lines,
+  from 0. A symbol names an engine declared above it. A symbol's slot in
+  its engine is its order among that engine's symbols.
+- Numbers are whole decimal tokens. Prices are ticks.
+- Rejected: unknown keyword or gateway key, wrong field count, bad or
+  out-of-range number, duplicate `symbol_id`, session name, or gateway
+  key, `min_price > max_price`, `max_orders` or port 0, a name or token
+  over 16 bytes, a queue capacity that is not a power of two, a non-IPv4
+  address, an engine with no symbols, a missing gateway key, and no
+  engines, symbols, or sessions.
+
+A bad config stops startup with an error that names the line (0 when the
+error is not on one line) and the reason. Nothing is read after startup.
 
 ## Out of v1 scope (locked)
 
@@ -348,6 +367,6 @@ Each step is testable on its own:
 ## Where we are
 
 v1 design locked. Steps 1 (SPSC queue), 2 (`protocol.hpp`), 3
-(`Book::ReduceOrder` / `Book::ReplaceOrder`), and 4 (`engine.hpp/.cpp`)
-are done. Thread pinning is not in the engine yet; it comes with `main`.
-Next: step 5 (config parser).
+(`Book::ReduceOrder` / `Book::ReplaceOrder`), 4 (`engine.hpp/.cpp`), and
+5 (`config.hpp/.cpp`) are done. Thread pinning is not in the engine yet;
+it comes with `main`. Next: step 6 (gateway).
