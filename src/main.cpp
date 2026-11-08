@@ -3,8 +3,11 @@
 #include "gateway.hpp"
 #include "spsc_queue.hpp"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstddef>
@@ -12,7 +15,6 @@
 #include <cstdio>
 #include <cstring>
 #include <expected>
-#include <format>
 #include <functional>
 #include <latch>
 #include <memory>
@@ -20,7 +22,8 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stop_token>
-#include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -41,6 +44,8 @@ using mex::SpscQueue;
 constexpr int kExitFailure = 1;
 constexpr int kExitUsage = 2;
 constexpr auto kStopPollInterval = std::chrono::milliseconds{50};
+// Linux permits 15 name bytes and a terminating NUL.
+constexpr std::size_t kThreadNameBytes = 16;
 
 // Set by the signal handler. A lock-free atomic store is signal-safe.
 std::atomic<bool> stop_requested{false};
@@ -81,9 +86,16 @@ void OnStopSignal(int) { stop_requested.store(true, std::memory_order_relaxed); 
   return {};
 }
 
-void SetThreadName(const std::string &p_name)
+void SetThreadName(std::string_view p_name)
 {
-  const int result = ::pthread_setname_np(::pthread_self(), p_name.c_str());
+  std::array<char, kThreadNameBytes> name{};
+  if (p_name.size() >= name.size())
+  {
+    std::println(stderr, "mex_exchange: warning: thread name too long: {}", p_name);
+    return;
+  }
+  std::ranges::copy(p_name, name.begin());
+  const int result = ::pthread_setname_np(::pthread_self(), name.data());
   if (result != 0)
   {
     std::println(stderr, "mex_exchange: warning: cannot name thread {}: {}", p_name,
@@ -109,7 +121,19 @@ struct EngineSlot
 // Engine thread. It builds its Engine so that its Books are first touched here.
 void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, std::size_t p_index)
 {
-  SetThreadName(std::format("mex-engine-{}", p_index));
+  constexpr std::string_view kEnginePrefix = "mex-engine-";
+  std::array<char, kThreadNameBytes> name{};
+  std::ranges::copy(kEnginePrefix, name.begin());
+  const auto converted =
+      std::to_chars(name.data() + kEnginePrefix.size(), name.data() + name.size() - 1, p_index);
+  if (converted.ec == std::errc{})
+  {
+    SetThreadName(std::string_view{name.data(), converted.ptr});
+  }
+  else
+  {
+    std::println(stderr, "mex_exchange: warning: thread name too long for engine {}", p_index);
+  }
   if (const auto pinned = PinToCore(p_slot.config_.core_); !pinned.has_value())
   {
     std::println(stderr, "mex_exchange: warning: engine thread not pinned to core {}: {}",
