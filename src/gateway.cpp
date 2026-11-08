@@ -609,17 +609,9 @@ bool Gateway::Append(std::uint32_t p_index, std::uint64_t p_seq, const M &p_mess
   Connection &connection = connections_[p_index];
   if (kSendBufferSize - connection.send_end_ < kSize)
   {
-    if (!Flush(p_index))
+    if (!MakeRoom(p_index))
     {
       return false;
-    }
-    // Bytes that a send in flight reads must stay where they are.
-    if (!connection.send_in_flight_)
-    {
-      std::memmove(connection.send_.data(), connection.send_.data() + connection.send_begin_,
-                   connection.send_end_ - connection.send_begin_);
-      connection.send_end_ -= connection.send_begin_;
-      connection.send_begin_ = 0;
     }
     if (kSendBufferSize - connection.send_end_ < kSize)
     {
@@ -629,13 +621,47 @@ bool Gateway::Append(std::uint32_t p_index, std::uint64_t p_seq, const M &p_mess
   static_cast<void>(
       wire::Encode(p_seq, p_message, std::span{connection.send_}.subspan(connection.send_end_)));
   connection.send_end_ += kSize;
+  MarkPendingFlush(p_index);
+  return true;
+}
+
+void Gateway::MarkPendingFlush(std::uint32_t p_index)
+{
+  Connection &connection = connections_[p_index];
   // Close does not clear pending_flush_, so an index is in the list at most once.
   if (!connection.pending_flush_)
   {
     connection.pending_flush_ = true;
     pending_flush_.push_back(p_index);
   }
+}
+
+bool Gateway::MakeRoom(std::uint32_t p_index)
+{
+  Connection &connection = connections_[p_index];
+  // io_uring: a send in flight means the socket buffer was full when the kernel
+  // tried it, and its bytes must stay where they are.
+  const bool open = sockets_.io_ == GatewayIo::Epoll
+                        ? FlushEpoll(p_index)
+                        : (connection.send_in_flight_ || Write(p_index));
+  if (!open)
+  {
+    return false;
+  }
+  if (!connection.send_in_flight_)
+  {
+    Compact(p_index);
+  }
   return true;
+}
+
+void Gateway::Compact(std::uint32_t p_index)
+{
+  Connection &connection = connections_[p_index];
+  std::memmove(connection.send_.data(), connection.send_.data() + connection.send_begin_,
+               connection.send_end_ - connection.send_begin_);
+  connection.send_end_ -= connection.send_begin_;
+  connection.send_begin_ = 0;
 }
 
 bool Gateway::Flush(std::uint32_t p_index)
@@ -653,6 +679,16 @@ bool Gateway::Flush(std::uint32_t p_index)
 
 bool Gateway::FlushEpoll(std::uint32_t p_index)
 {
+  if (!Write(p_index))
+  {
+    return false;
+  }
+  const Connection &connection = connections_[p_index];
+  return SetWriteInterest(p_index, connection.send_begin_ < connection.send_end_);
+}
+
+bool Gateway::Write(std::uint32_t p_index)
+{
   Connection &connection = connections_[p_index];
   while (connection.send_begin_ < connection.send_end_)
   {
@@ -665,7 +701,7 @@ bool Gateway::FlushEpoll(std::uint32_t p_index)
     }
     if (sent < 0 && WouldBlock(errno))
     {
-      return SetWriteInterest(p_index, true);
+      return true;
     }
     if (sent <= 0)
     {
@@ -676,7 +712,7 @@ bool Gateway::FlushEpoll(std::uint32_t p_index)
   }
   connection.send_begin_ = 0;
   connection.send_end_ = 0;
-  return SetWriteInterest(p_index, false);
+  return true;
 }
 
 void Gateway::FlushPending()
@@ -907,24 +943,23 @@ void Gateway::OnSent(std::uint32_t p_index, std::int32_t p_result)
     ReleaseIfIdle(p_index);
     return;
   }
-  if (IsRetry(p_result))
-  {
-    SubmitSend(p_index);
-    return;
-  }
-  if (p_result <= 0)
+  if (p_result <= 0 && !IsRetry(p_result))
   {
     Close(p_index);
     return;
   }
-  connection.send_begin_ += static_cast<std::size_t>(p_result);
-  if (connection.send_begin_ == connection.send_end_)
+  if (p_result > 0)
   {
-    connection.send_begin_ = 0;
-    connection.send_end_ = 0;
-    return;
+    connection.send_begin_ += static_cast<std::size_t>(p_result);
   }
-  SubmitSend(p_index); // the rest of this send, and what was appended meanwhile
+  // No send is in flight now, so the sent bytes can go. The rest, with what was
+  // appended meanwhile, is sent at the end of this iteration; until then
+  // Append may write and compact as well.
+  Compact(p_index);
+  if (connection.send_end_ > 0)
+  {
+    MarkPendingFlush(p_index);
+  }
 }
 
 void Gateway::ArmAccept()
