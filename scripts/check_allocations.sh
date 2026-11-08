@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Measures the real CLI and config parsers with the existing allocation hooks.
-# Usage: scripts/check_allocations.sh [source directory] [build directory]
+# Usage: scripts/check_allocations.sh [source directory]
 set -euo pipefail
 
 source_dir=${1:-$(cd "$(dirname "$0")/.." && pwd)}
-build_dir=${2:-$source_dir/build}
 work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
@@ -35,6 +34,14 @@ int main(int p_argc, char **p_argv)
       return 1;
     }
   }
+  Options rejected{};
+  for (const std::string_view symbols : {"", "1,", ",1", "1,,2", "invalid"})
+  {
+    if (ApplyOption(rejected, "--symbols", symbols).has_value())
+    {
+      return 1;
+    }
+  }
 
   g_new_calls.store(0);
   g_count_news.store(true);
@@ -46,12 +53,18 @@ int main(int p_argc, char **p_argv)
   {
     return 1;
   }
-  std::println("CLI symbols: {} allocations; config error: {} allocations",
+  std::println("CLI symbol allocations: {}; config error allocations: {}",
                symbol_allocations, error_allocations);
+  constexpr std::uint64_t kSymbolAllocationBudget = 2;
+  constexpr std::uint64_t kErrorAllocationBudget = 1;
+  return symbol_allocations <= kSymbolAllocationBudget && error_allocations <= kErrorAllocationBudget
+             ? 0
+             : 1;
 }
 CPP
 
 "${CXX:-c++}" -std=c++26 -fcontracts -O2 -Wall -Wextra -Wpedantic -Wconversion \
   -Wsign-conversion -Werror -I"$source_dir" -I"$source_dir/src" \
-  "$work_dir/probe.cpp" "$build_dir/libmex.a" -lgtest -pthread -o "$work_dir/probe"
+  "$work_dir/probe.cpp" "$source_dir"/src/{book,config,engine,gateway}.cpp \
+  -lgtest -pthread -o "$work_dir/probe"
 "$work_dir/probe" --symbols 1,2,3,4,5,6,7,8,9,10,11,12
