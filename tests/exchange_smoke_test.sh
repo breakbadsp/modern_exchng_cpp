@@ -48,12 +48,16 @@ fi
 # Check the names shown by Linux monitoring tools after all threads start.
 expected_names=$(
   {
-    printf '%s\n' mex-main mex-gateway
+    printf '%s\n' mex_exchange mex-gateway
     awk '$1 == "engine" { print "mex-engine-" engine_index++ }' "$config"
   } | sort
 )
 for _ in $(seq 100); do
-  actual_names=$(cat /proc/"$pid"/task/*/comm | sort)
+  if ! actual_names=$(cat /proc/"$pid"/task/*/comm | sort); then
+    echo "FAIL: cannot read exchange thread names"
+    cat "$log"
+    exit 1
+  fi
   if [[ "$actual_names" == "$expected_names" ]]; then
     break
   fi
@@ -61,6 +65,7 @@ for _ in $(seq 100); do
 done
 if [[ "$actual_names" != "$expected_names" ]]; then
   printf 'FAIL: thread names\nExpected:\n%s\nActual:\n%s\n' "$expected_names" "$actual_names"
+  cat "$log"
   exit 1
 fi
 

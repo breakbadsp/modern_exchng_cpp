@@ -126,7 +126,6 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
 
 [[nodiscard]] int RunExchange(const Config &p_config)
 {
-  SetThreadName("mex-main");
   if (const auto installed = InstallStopHandler(); !installed.has_value())
   {
     std::println(stderr, "mex_exchange: sigaction: {}", std::strerror(installed.error()));
