@@ -45,6 +45,25 @@ if [[ -z "$pid" ]]; then
   exit 1
 fi
 
+# Check the names shown by Linux monitoring tools after all threads start.
+expected_names=$(
+  {
+    printf '%s\n' mex-main mex-gateway
+    awk '$1 == "engine" { print "mex-engine-" engine_index++ }' "$config"
+  } | sort
+)
+for _ in $(seq 100); do
+  actual_names=$(cat /proc/"$pid"/task/*/comm | sort)
+  if [[ "$actual_names" == "$expected_names" ]]; then
+    break
+  fi
+  sleep 0.01
+done
+if [[ "$actual_names" != "$expected_names" ]]; then
+  printf 'FAIL: thread names\nExpected:\n%s\nActual:\n%s\n' "$expected_names" "$actual_names"
+  exit 1
+fi
+
 loadgen_status=0
 "$loadgen" --port "$port" --symbols 1,2,3 --orders 20000 --window 512 || loadgen_status=$?
 

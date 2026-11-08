@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <expected>
+#include <format>
 #include <functional>
 #include <latch>
 #include <memory>
@@ -19,6 +20,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stop_token>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -79,6 +81,16 @@ void OnStopSignal(int) { stop_requested.store(true, std::memory_order_relaxed); 
   return {};
 }
 
+void SetThreadName(const std::string &p_name)
+{
+  const int result = ::pthread_setname_np(::pthread_self(), p_name.c_str());
+  if (result != 0)
+  {
+    std::println(stderr, "mex_exchange: warning: cannot name thread {}: {}", p_name,
+                 std::strerror(result));
+  }
+}
+
 // What main owns for one engine. The Engine itself lives on its thread.
 struct EngineSlot
 {
@@ -95,8 +107,9 @@ struct EngineSlot
 };
 
 // Engine thread. It builds its Engine so that its Books are first touched here.
-void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready)
+void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, std::size_t p_index)
 {
+  SetThreadName(std::format("mex-engine-{}", p_index));
   if (const auto pinned = PinToCore(p_slot.config_.core_); !pinned.has_value())
   {
     std::println(stderr, "mex_exchange: warning: engine thread not pinned to core {}: {}",
@@ -113,6 +126,7 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready)
 
 [[nodiscard]] int RunExchange(const Config &p_config)
 {
+  SetThreadName("mex-main");
   if (const auto installed = InstallStopHandler(); !installed.has_value())
   {
     std::println(stderr, "mex_exchange: sigaction: {}", std::strerror(installed.error()));
@@ -136,14 +150,18 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready)
 
   std::latch engines_ready{static_cast<std::ptrdiff_t>(slots.size())};
   std::vector<std::jthread> engine_threads;
-  for (const std::unique_ptr<EngineSlot> &slot : slots)
+  for (std::size_t index = 0; index < slots.size(); ++index)
   {
-    engine_threads.emplace_back(RunEngine, std::ref(*slot), std::ref(engines_ready));
+    engine_threads.emplace_back(RunEngine, std::ref(*slots[index]), std::ref(engines_ready), index);
   }
   engines_ready.wait();
 
   Gateway gateway{p_config, std::move(*sockets), queues};
-  std::jthread gateway_thread{[gateway_ptr = &gateway] { gateway_ptr->Run(); }};
+  std::jthread gateway_thread{[gateway_ptr = &gateway]
+                              {
+                                SetThreadName("mex-gateway");
+                                gateway_ptr->Run();
+                              }};
   std::println("mex_exchange: listening on {}:{} with {} engines",
                p_config.gateway_.listen_address_, port, slots.size());
   std::fflush(stdout);
