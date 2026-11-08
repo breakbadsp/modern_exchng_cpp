@@ -142,7 +142,7 @@ The reason: io_uring makes the system calls less frequent, but the system calls 
 
 Differences in behavior:
 
-- While a send is in flight, the kernel reads those bytes, so the gateway does not move them. Reports appended meanwhile must fit behind them in the 1024-frame send buffer, or the client is disconnected as a slow consumer. epoll writes to the socket at once when the buffer fills, so only bytes that the kernel socket buffer refused stay there.
+- While a send is in flight, the kernel reads those bytes, so the gateway does not move them. A send is still in flight during the outbound drain only if the socket buffer was full when the kernel tried it. Reports appended meanwhile must fit behind it in the 1024-frame send buffer, or the client is disconnected as a slow consumer, which matches the epoll policy.
 - A closed connection's slot is reused only after its recv and send have completed: Close cancels both (by user data) and closes the fd, and the slot returns to the free list on the last completion. Until then, a new connection beyond `max_connections` is closed, as in epoll.
 - `Run()` cancels all operations after `Stop()` and waits for them, so the buffers outlive every kernel access.
 

@@ -8,8 +8,11 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
+#include <atomic>
+#include <bit>
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -20,7 +23,9 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <optional>
+#include <pthread.h>
 #include <span>
+#include <stop_token>
 #include <string_view>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -70,7 +75,7 @@ gateway address 127.0.0.1
 gateway port 9000
 gateway max_connections {}
 gateway inbound_queue_capacity {}
-gateway outbound_queue_capacity 64
+gateway outbound_queue_capacity {}
 )";
 
 [[nodiscard]] wire::Name NameOf(std::string_view p_text)
@@ -98,7 +103,11 @@ struct Options
 {
   std::uint32_t max_connections_ = 4;
   std::uint32_t inbound_capacity_ = 64;
+  std::uint32_t outbound_capacity_ = 64;
   bool run_engines_ = true; // false: the test itself is the engine side of the queues
+  // SO_SNDBUF of the listener, which accepted sockets inherit; it also stops
+  // the kernel from growing their send buffers.
+  std::optional<int> send_buffer_{};
 };
 
 // Gateway and engines on their own threads, wired with real queues.
@@ -107,8 +116,9 @@ class Exchange final
 public:
   explicit Exchange(GatewayIo p_io, const Options &p_options = {})
   {
-    auto config = mex::ParseConfig(
-        std::format(kConfigFormat, p_options.max_connections_, p_options.inbound_capacity_));
+    auto config =
+        mex::ParseConfig(std::format(kConfigFormat, p_options.max_connections_,
+                                     p_options.inbound_capacity_, p_options.outbound_capacity_));
     if (!config.has_value())
     {
       ADD_FAILURE() << "config line " << config.error().line_ << ": " << config.error().reason_;
@@ -132,6 +142,12 @@ public:
     {
       ADD_FAILURE() << sockets.error();
       return;
+    }
+    if (p_options.send_buffer_.has_value())
+    {
+      EXPECT_EQ(::setsockopt(sockets->listener_.Get(), SOL_SOCKET, SO_SNDBUF,
+                             &*p_options.send_buffer_, sizeof(int)),
+                0);
     }
     port_ = sockets->port_;
     gateway_ = std::make_unique<Gateway>(*config, std::move(*sockets), queues);
@@ -164,6 +180,7 @@ public:
   }
 
   [[nodiscard]] std::uint16_t Port() const { return port_; }
+  [[nodiscard]] pthread_t GatewayThread() { return threads_.front().native_handle(); }
   [[nodiscard]] Gateway &Gate() const { return *gateway_; }
   // Only when run_engines_ is false: the test is then the engine side.
   [[nodiscard]] SpscQueue<Command> &Inbound(std::size_t p_engine) const
@@ -182,6 +199,41 @@ private:
   std::unique_ptr<Gateway> gateway_{};
   std::uint16_t port_ = 0;
   std::vector<std::jthread> threads_{};
+};
+
+// Holds the gateway thread inside a signal handler, so that the test can fill
+// a queue that the gateway then drains in one pass.
+std::atomic<bool> gateway_stalled{false};
+std::atomic<bool> gateway_released{false};
+static_assert(std::atomic<bool>::is_always_lock_free);
+
+void HoldGateway(int)
+{
+  gateway_stalled.store(true);
+  while (!gateway_released.load())
+  {
+  }
+}
+
+class GatewayStall final
+{
+public:
+  explicit GatewayStall(pthread_t p_thread)
+  {
+    gateway_stalled.store(false);
+    gateway_released.store(false);
+    struct sigaction action{};
+    action.sa_handler = HoldGateway;
+    sigemptyset(&action.sa_mask);
+    EXPECT_EQ(::sigaction(SIGUSR1, &action, nullptr), 0);
+    EXPECT_EQ(::pthread_kill(p_thread, SIGUSR1), 0);
+    EXPECT_TRUE(WaitFor([] { return gateway_stalled.load(); }));
+  }
+  GatewayStall(const GatewayStall &) = delete;
+  GatewayStall &operator=(const GatewayStall &) = delete;
+  GatewayStall(GatewayStall &&) = delete;
+  GatewayStall &operator=(GatewayStall &&) = delete;
+  ~GatewayStall() { gateway_released.store(true); }
 };
 
 using Frame = wire::Decoded<wire::ExchangeMessage>;
@@ -703,6 +755,72 @@ TEST_P(GatewayTest, SlotOfASlowConsumerIsReusedCleanly)
   EXPECT_TRUE(std::holds_alternative<wire::LogonAck>(first->message_));
   Push(exchange.Outbound(1), RejectFor(kBob, 77));
   EXPECT_EQ(Next<wire::Reject>(*bob, 2).client_order_id_, 77U);
+}
+
+// More than one send buffer of reports for one session in one drain pass, to
+// a client whose socket buffer has room: the gateway writes as it goes.
+TEST_P(GatewayTest, BurstLargerThanTheSendBufferIsDelivered)
+{
+  constexpr std::uint64_t kReports = mex::kSendBufferSize / wire::kFrameSize<wire::Reject> + 64;
+  Exchange exchange{GetParam(),
+                    {.outbound_capacity_ = std::bit_ceil(static_cast<std::uint32_t>(kReports)),
+                     .run_engines_ = false}};
+  const Client alice{exchange.Port()};
+  alice.Send(AliceLogon());
+  static_cast<void>(Next<wire::LogonAck>(alice, 1));
+
+  {
+    const GatewayStall stall{exchange.GatewayThread()};
+    for (std::uint64_t id = 1; id <= kReports; ++id)
+    {
+      ASSERT_TRUE(exchange.Outbound(0).TryPush(RejectFor(kAlice, id)));
+    }
+  }
+
+  for (std::uint64_t id = 1; id <= kReports; ++id)
+  {
+    ASSERT_EQ(Next<wire::Reject>(alice, id + 1).client_order_id_, id);
+  }
+  EXPECT_EQ(exchange.Gate().DroppedReports(), 0U);
+}
+
+// A client that reads steadily while its socket buffers stay full: the unsent
+// reports never exceed most of the send buffer, but many buffers pass through it.
+TEST_P(GatewayTest, SlowReaderThatKeepsUpIsNotDisconnected)
+{
+  constexpr int kSmallBuffer = 4096;
+  constexpr std::uint64_t kFrame = wire::kFrameSize<wire::Reject>;
+  constexpr std::uint64_t kBacklog = mex::kSendBufferSize * 3 / 4 / kFrame;
+  constexpr std::uint64_t kReports = 8 * mex::kSendBufferSize / kFrame;
+  const Exchange exchange{
+      GetParam(),
+      {.outbound_capacity_ = 1024, .run_engines_ = false, .send_buffer_ = kSmallBuffer}};
+  const Client alice{exchange.Port(), kSmallBuffer};
+  alice.Send(AliceLogon());
+  static_cast<void>(Next<wire::LogonAck>(alice, 1));
+
+  std::atomic<std::uint64_t> received{0};
+  const std::jthread pusher{[&](const std::stop_token &p_stop)
+                            {
+                              for (std::uint64_t id = 1;
+                                   id <= kReports && !p_stop.stop_requested();)
+                              {
+                                if (id - received.load() <= kBacklog &&
+                                    exchange.Outbound(0).TryPush(RejectFor(kAlice, id)))
+                                {
+                                  ++id;
+                                }
+                              }
+                            }};
+
+  for (std::uint64_t id = 1; id <= kReports; ++id)
+  {
+    const std::optional<Frame> frame = alice.Read();
+    ASSERT_TRUE(frame.has_value()) << "closed after " << id - 1 << " reports";
+    ASSERT_EQ(frame->seq_, id + 1);
+    received.store(id);
+  }
+  EXPECT_EQ(exchange.Gate().DroppedReports(), 0U);
 }
 
 TEST_P(GatewayTest, ReportForASessionWithoutConnectionIsDropped)

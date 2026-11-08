@@ -171,7 +171,16 @@ private:
   // Returns false if it closed the connection.
   bool Flush(std::uint32_t p_index);
   bool FlushEpoll(std::uint32_t p_index);
+  // Writes what the kernel takes now. Returns false if it closed the connection.
+  bool Write(std::uint32_t p_index);
+  // For a frame that does not fit: writes what the kernel takes now unless an
+  // io_uring send is in flight, then drops the sent bytes. Returns false if it
+  // closed the connection.
+  bool MakeRoom(std::uint32_t p_index);
+  // Moves the unsent bytes to the start of the send buffer. No send may be in flight.
+  void Compact(std::uint32_t p_index);
   void FlushPending();
+  void MarkPendingFlush(std::uint32_t p_index);
   [[nodiscard]] bool SetWriteInterest(std::uint32_t p_index, bool p_want_write);
 
   // io_uring backend. The kernel owns a connection's read buffer while its recv
