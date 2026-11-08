@@ -3,7 +3,6 @@
 #include "gateway.hpp"
 #include "spsc_queue.hpp"
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -22,7 +21,6 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stop_token>
-#include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -86,23 +84,6 @@ void OnStopSignal(int) { stop_requested.store(true, std::memory_order_relaxed); 
   return {};
 }
 
-void SetThreadName(std::string_view p_name)
-{
-  std::array<char, kThreadNameBytes> name{};
-  if (p_name.size() >= name.size())
-  {
-    std::println(stderr, "mex_exchange: warning: thread name too long: {}", p_name);
-    return;
-  }
-  std::ranges::copy(p_name, name.begin());
-  const int result = ::pthread_setname_np(::pthread_self(), name.data());
-  if (result != 0)
-  {
-    std::println(stderr, "mex_exchange: warning: cannot name thread {}: {}", p_name,
-                 std::strerror(result));
-  }
-}
-
 // What main owns for one engine. The Engine itself lives on its thread.
 struct EngineSlot
 {
@@ -121,18 +102,15 @@ struct EngineSlot
 // Engine thread. It builds its Engine so that its Books are first touched here.
 void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, std::size_t p_index)
 {
-  constexpr std::string_view kEnginePrefix = "mex-engine-";
-  std::array<char, kThreadNameBytes> name{};
-  std::ranges::copy(kEnginePrefix, name.begin());
+  std::array<char, kThreadNameBytes> name{"mex-engine-"};
   const auto converted =
-      std::to_chars(name.data() + kEnginePrefix.size(), name.data() + name.size() - 1, p_index);
-  if (converted.ec == std::errc{})
+      std::to_chars(name.data() + std::strlen(name.data()), name.data() + name.size() - 1, p_index);
+  const int named =
+      converted.ec == std::errc{} ? ::pthread_setname_np(::pthread_self(), name.data()) : ERANGE;
+  if (named != 0)
   {
-    SetThreadName(std::string_view{name.data(), converted.ptr});
-  }
-  else
-  {
-    std::println(stderr, "mex_exchange: warning: thread name too long for engine {}", p_index);
+    std::println(stderr, "mex_exchange: warning: cannot name engine {} thread: {}", p_index,
+                 std::strerror(named));
   }
   if (const auto pinned = PinToCore(p_slot.config_.core_); !pinned.has_value())
   {
@@ -180,11 +158,16 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
   engines_ready.wait();
 
   Gateway gateway{p_config, std::move(*sockets), queues};
-  std::jthread gateway_thread{[gateway_ptr = &gateway]
-                              {
-                                SetThreadName("mex-gateway");
-                                gateway_ptr->Run();
-                              }};
+  std::jthread gateway_thread{
+      [gateway_ptr = &gateway]
+      {
+        if (const int named = ::pthread_setname_np(::pthread_self(), "mex-gateway"); named != 0)
+        {
+          std::println(stderr, "mex_exchange: warning: cannot name gateway thread: {}",
+                       std::strerror(named));
+        }
+        gateway_ptr->Run();
+      }};
   std::println("mex_exchange: listening on {}:{} with {} engines",
                p_config.gateway_.listen_address_, port, slots.size());
   std::fflush(stdout);
