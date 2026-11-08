@@ -35,7 +35,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends cmake ninja-build libgtest-dev
+          apt-get install --yes --no-install-recommends cmake ninja-build libgtest-dev liburing-dev pkg-config
 
       # libvsr is private. This key has read-only access to that repository.
       - name: Check out libvsr

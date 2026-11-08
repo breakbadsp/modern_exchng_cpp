@@ -74,6 +74,10 @@ if(MEX_SANITIZER_LIST)
     add_link_options(-fsanitize=${MEX_SANITIZER_CSV})
 endif()
 
+# The gateway's io_uring backend.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBURING REQUIRED IMPORTED_TARGET liburing)
+
 # libvsr does the replication (docs/replication.md). Set MEX_LIBVSR_SOURCE_DIR
 # to build with a local checkout; otherwise CMake gets the pinned commit.
 set(MEX_LIBVSR_SOURCE_DIR "" CACHE PATH "A local libvsr checkout to use")
@@ -97,6 +101,8 @@ target_include_directories(mex PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
 )
+find_package(Threads REQUIRED)
+target_link_libraries(mex PRIVATE PkgConfig::LIBURING Threads::Threads)
 target_compile_options(mex PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
 
 find_package(GTest REQUIRED)
@@ -109,8 +115,6 @@ add_executable(test_book
 target_link_libraries(test_book PRIVATE mex GTest::gtest_main)
 target_include_directories(test_book PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_compile_options(test_book PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
-
-find_package(Threads REQUIRED)
 
 add_executable(test_spsc_queue tests/spsc_queue_test.cpp)
 target_link_libraries(test_spsc_queue PRIVATE mex GTest::gtest_main Threads::Threads)
@@ -159,7 +163,7 @@ target_compile_options(bench_client PRIVATE -O3 -g -DNDEBUG -fno-omit-frame-poin
 add_executable(mex_exchange src/main.cpp src/book.cpp src/config.cpp src/engine.cpp
     src/gateway.cpp src/replication.cpp src/replicated_exchange.cpp)
 target_include_directories(mex_exchange PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mex_exchange PRIVATE vsr_io Threads::Threads)
+target_link_libraries(mex_exchange PRIVATE vsr_io Threads::Threads PkgConfig::LIBURING)
 target_compile_options(mex_exchange PRIVATE -O3 -DNDEBUG
     -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
 
@@ -183,7 +187,12 @@ add_test(NAME exchange_smoke
         $<TARGET_FILE:mex_exchange> $<TARGET_FILE:mex_loadgen>
         ${CMAKE_CURRENT_SOURCE_DIR}/config/example.cfg
         ${CMAKE_CURRENT_BINARY_DIR}/exchange_smoke)
-set_tests_properties(exchange_smoke PROPERTIES TIMEOUT 60)
+add_test(NAME exchange_smoke_uring
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_smoke_test.sh
+        $<TARGET_FILE:mex_exchange> $<TARGET_FILE:mex_loadgen>
+        ${CMAKE_CURRENT_SOURCE_DIR}/config/example.cfg
+        ${CMAKE_CURRENT_BINARY_DIR}/exchange_smoke_uring uring)
+set_tests_properties(exchange_smoke exchange_smoke_uring PROPERTIES TIMEOUT 60)
 # Three replicas on loopback: failover, restart, and equal state.
 add_test(NAME replicated_smoke
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/replicated_smoke_test.sh

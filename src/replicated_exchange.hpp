@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.hpp"
+#include "gateway.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -16,6 +17,7 @@ struct ReplicaArguments
 {
   std::uint8_t replica_ = 0; // index into Config::replicas_
   std::string data_path_{};  // the storage file of this replica
+  GatewayIo io_ = GatewayIo::Epoll;
 };
 
 // Runs until p_stop_requested is true or the replica halts. Returns the

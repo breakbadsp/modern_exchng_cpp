@@ -5,12 +5,14 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
+#include <bit>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <expected>
 #include <format>
+#include <liburing.h>
 #include <memory>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -22,6 +24,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <system_error>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <variant>
@@ -36,6 +39,99 @@ constexpr std::uint64_t kListenerTag = ~std::uint64_t{0};
 
 constexpr std::uint64_t kFirstSeq = 1;
 
+// io_uring ring size. A connection queues about a recv, a send, and two cancels
+// per loop iteration, so the SQ seldom fills before the next submit; GetSqe
+// submits early when it does.
+constexpr std::uint64_t kSqesPerConnection = 4;
+constexpr std::uint64_t kSpareSqes = 2;        // accept and the final cancel
+constexpr std::uint64_t kMaxSqEntries = 32768; // IORING_MAX_ENTRIES
+constexpr std::uint32_t kCqPerSq = 2;          // room for a burst of accepts
+
+// The SINGLE_ISSUER ring starts disabled, so that the gateway thread, not the
+// thread that opens it, becomes its issuer. COOP_TASKRUN with TASKRUN_FLAG: the
+// kernel does not interrupt the loop to post completions, but sets a flag that
+// io_uring_peek_cqe checks, and only then enters the kernel to run that work.
+constexpr std::uint32_t kRingFlags =
+    IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_R_DISABLED | IORING_SETUP_COOP_TASKRUN |
+    IORING_SETUP_TASKRUN_FLAG | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE | IORING_SETUP_CLAMP;
+
+// After Stop(): how long Run() waits for cancelled I/O before it gives up.
+constexpr std::uint32_t kStopWaits = 100;
+constexpr long kStopWaitNanoseconds = 10'000'000;
+
+// io_uring user data: the operation, the slot generation, and the slot index.
+// The listener's accept and the cancels use slot 0, generation 0.
+enum class Op : std::uint8_t
+{
+  Accept = 0,
+  Recv,
+  Send,
+  Cancel,
+};
+
+constexpr std::uint32_t kGenerationBits = 24;
+constexpr std::uint32_t kGenerationMask = (std::uint32_t{1} << kGenerationBits) - 1;
+constexpr std::uint32_t kOpShift = 56;
+constexpr std::uint32_t kGenerationShift = 32;
+
+[[nodiscard]] constexpr std::uint64_t UserData(Op p_op, std::uint32_t p_generation,
+                                               std::uint32_t p_index)
+{
+  return (std::uint64_t{static_cast<std::uint8_t>(p_op)} << kOpShift) |
+         (std::uint64_t{p_generation & kGenerationMask} << kGenerationShift) | p_index;
+}
+
+[[nodiscard]] constexpr Op OpOf(std::uint64_t p_user_data)
+{
+  return static_cast<Op>(p_user_data >> kOpShift);
+}
+
+[[nodiscard]] constexpr std::uint32_t GenerationOf(std::uint64_t p_user_data)
+{
+  return static_cast<std::uint32_t>(p_user_data >> kGenerationShift) & kGenerationMask;
+}
+
+[[nodiscard]] constexpr std::uint32_t IndexOf(std::uint64_t p_user_data)
+{
+  return static_cast<std::uint32_t>(p_user_data);
+}
+
+// True for the last completion of an operation; a multishot accept posts many.
+[[nodiscard]] bool IsFinal(std::uint64_t p_user_data, std::uint32_t p_flags)
+{
+  switch (OpOf(p_user_data))
+  {
+  case Op::Accept:
+    return (p_flags & IORING_CQE_F_MORE) == 0;
+  case Op::Recv:
+  case Op::Send:
+    return true;
+  case Op::Cancel:
+    return false; // not counted in Gateway::uring_ops_
+  }
+  return false;
+}
+
+// A transient result: the same operation is submitted again.
+[[nodiscard]] bool IsRetry(std::int32_t p_result)
+{
+  return p_result == -EAGAIN || p_result == -EINTR;
+}
+
+// An SQE; if the SQ is full, submits it first. With SUBMIT_ALL the kernel
+// consumes every queued SQE, so the retry finds a free one.
+[[nodiscard]] io_uring_sqe *GetSqe(io_uring *p_ring)
+{
+  io_uring_sqe *sqe = io_uring_get_sqe(p_ring);
+  if (sqe == nullptr)
+  {
+    static_cast<void>(io_uring_submit(p_ring));
+    sqe = io_uring_get_sqe(p_ring);
+  }
+  contract_assert(sqe != nullptr);
+  return sqe;
+}
+
 [[nodiscard]] std::unexpected<std::string> SystemError(std::string_view p_what)
 {
   return std::unexpected(std::format("{}: {}", p_what, std::system_category().message(errno)));
@@ -44,6 +140,54 @@ constexpr std::uint64_t kFirstSeq = 1;
 [[nodiscard]] bool WouldBlock(int p_errno) { return p_errno == EAGAIN || p_errno == EWOULDBLOCK; }
 
 } // namespace
+
+UniqueRing::UniqueRing() = default;
+
+UniqueRing::~UniqueRing() { Reset(); }
+
+UniqueRing::UniqueRing(UniqueRing &&p_other) noexcept : ring_(std::move(p_other.ring_)) {}
+
+UniqueRing &UniqueRing::operator=(UniqueRing &&p_other) noexcept
+{
+  if (this != &p_other)
+  {
+    Reset();
+    ring_ = std::move(p_other.ring_);
+  }
+  return *this;
+}
+
+std::expected<UniqueRing, int> UniqueRing::Create(std::uint32_t p_sq_entries,
+                                                  std::uint32_t p_cq_entries, std::uint32_t p_flags)
+{
+  auto ring = std::make_unique<io_uring>();
+  io_uring_params params{};
+  params.flags = p_flags;
+  params.cq_entries = p_cq_entries;
+  // The thread that creates a ring stays linked to it until that thread ends.
+  // When the ring is destroyed, the kernel interrupts every linked thread with
+  // task work, so a blocking call with a timeout in that thread fails with
+  // EINTR. A short-lived thread creates the ring, so that no caller is linked.
+  int result = 0;
+  std::jthread{[&] { result = io_uring_queue_init_params(p_sq_entries, ring.get(), &params); }}
+      .join();
+  if (result < 0)
+  {
+    return std::unexpected(-result);
+  }
+  UniqueRing owner{};
+  owner.ring_ = std::move(ring);
+  return owner;
+}
+
+void UniqueRing::Reset()
+{
+  if (ring_ != nullptr)
+  {
+    io_uring_queue_exit(ring_.get());
+    ring_.reset();
+  }
+}
 
 UniqueFd &UniqueFd::operator=(UniqueFd &&p_other) noexcept
 {
@@ -64,9 +208,11 @@ void UniqueFd::Reset()
   }
 }
 
-std::expected<GatewaySockets, std::string> OpenGatewaySockets(const GatewayConfig &p_config)
+std::expected<GatewaySockets, std::string> OpenGatewaySockets(const GatewayConfig &p_config,
+                                                              GatewayIo p_io)
 {
   GatewaySockets sockets{};
+  sockets.io_ = p_io;
   sockets.listener_ = UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
   if (!sockets.listener_.IsOpen())
   {
@@ -101,6 +247,20 @@ std::expected<GatewaySockets, std::string> OpenGatewaySockets(const GatewayConfi
   }
   sockets.port_ = ntohs(address.sin_port);
 
+  if (p_io == GatewayIo::Uring)
+  {
+    const std::uint64_t wanted =
+        std::min(kSqesPerConnection * p_config.max_connections_ + kSpareSqes, kMaxSqEntries);
+    const auto sq_entries = static_cast<std::uint32_t>(std::bit_ceil(wanted));
+    auto ring = UniqueRing::Create(sq_entries, kCqPerSq * sq_entries, kRingFlags);
+    if (!ring.has_value())
+    {
+      return std::unexpected(
+          std::format("io_uring_queue_init: {}", std::system_category().message(ring.error())));
+    }
+    sockets.ring_ = std::move(*ring);
+    return sockets;
+  }
   sockets.epoll_ = UniqueFd{::epoll_create1(EPOLL_CLOEXEC)};
   if (!sockets.epoll_.IsOpen())
   {
@@ -123,6 +283,11 @@ struct Gateway::Connection
   std::size_t send_end_ = 0;
   bool want_write_ = false;    // EPOLLOUT is registered
   bool pending_flush_ = false; // the index is in Gateway::pending_flush_
+  // io_uring only. While recv_in_flight_ the kernel writes the free tail of
+  // read_; while send_in_flight_ it reads send_ from send_begin_ on.
+  std::uint32_t generation_ = 0; // in the user data of this slot's operations
+  bool recv_in_flight_ = false;
+  bool send_in_flight_ = false;
   std::array<std::byte, kReadBufferSize> read_{};
   std::array<std::byte, kSendBufferSize> send_{};
 };
@@ -146,15 +311,27 @@ Gateway::Gateway(const Config &p_config, GatewaySockets p_sockets,
     free_connections_.push_back(index - 1);
   }
   pending_flush_.reserve(max_connections);
+  if (sockets_.io_ == GatewayIo::Uring)
+  {
+    uring_cq_entries_ = sockets_.ring_.Get()->cq.ring_entries;
+  }
 }
 
 Gateway::~Gateway() = default;
 
 void Gateway::Run()
 {
+  if (sockets_.io_ == GatewayIo::Uring)
+  {
+    StartUring();
+  }
   while (!stop_.load(std::memory_order_relaxed))
   {
     PollOnce();
+  }
+  if (sockets_.io_ == GatewayIo::Uring)
+  {
+    StopUring();
   }
 }
 
@@ -166,6 +343,21 @@ std::uint64_t Gateway::DroppedReports() const
 }
 
 void Gateway::PollOnce()
+{
+  switch (sockets_.io_)
+  {
+  case GatewayIo::Epoll:
+    PollEpoll();
+    break;
+  case GatewayIo::Uring:
+    PollUring();
+    break;
+  }
+  DrainOutbound();
+  FlushPending();
+}
+
+void Gateway::PollEpoll()
 {
   // Timeout 0: busy-poll, so the outbound queues are drained while sockets are idle.
   const int count = ::epoll_wait(sockets_.epoll_.Get(), events_.data(), kMaxEvents, 0);
@@ -186,11 +378,9 @@ void Gateway::PollOnce()
     }
     if ((event.events & EPOLLOUT) != 0 && connections_[index].fd_.IsOpen())
     {
-      static_cast<void>(Flush(index));
+      static_cast<void>(FlushEpoll(index));
     }
   }
-  DrainOutbound();
-  FlushPending();
 }
 
 void Gateway::Accept()
@@ -198,23 +388,40 @@ void Gateway::Accept()
   // A connection beyond max_connections, or one that cannot be set up, is
   // closed when fd goes out of scope.
   UniqueFd fd{::accept4(sockets_.listener_.Get(), nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC)};
-  if (!fd.IsOpen() || free_connections_.empty())
+  if (fd.IsOpen())
+  {
+    Adopt(std::move(fd));
+  }
+}
+
+void Gateway::Adopt(UniqueFd p_fd)
+{
+  if (free_connections_.empty())
   {
     return;
   }
   const int one = 1;
-  if (::setsockopt(fd.Get(), IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0)
+  if (::setsockopt(p_fd.Get(), IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0)
   {
     return;
   }
   const std::uint32_t index = free_connections_.back();
-  epoll_event event{.events = EPOLLIN, .data = {.u64 = index}};
-  if (::epoll_ctl(sockets_.epoll_.Get(), EPOLL_CTL_ADD, fd.Get(), &event) != 0)
+  Connection &connection = connections_[index];
+  if (sockets_.io_ == GatewayIo::Epoll)
   {
-    return;
+    epoll_event event{.events = EPOLLIN, .data = {.u64 = index}};
+    if (::epoll_ctl(sockets_.epoll_.Get(), EPOLL_CTL_ADD, p_fd.Get(), &event) != 0)
+    {
+      return;
+    }
   }
   free_connections_.pop_back();
-  connections_[index].fd_ = std::move(fd);
+  connection.fd_ = std::move(p_fd);
+  if (sockets_.io_ == GatewayIo::Uring)
+  {
+    connection.generation_ = (connection.generation_ + 1) & kGenerationMask;
+    ArmRecv(index);
+  }
 }
 
 void Gateway::OnReadable(std::uint32_t p_index)
@@ -234,7 +441,12 @@ void Gateway::OnReadable(std::uint32_t p_index)
     return;
   }
   connection.read_size_ += static_cast<std::size_t>(received);
+  ProcessFrames(p_index);
+}
 
+void Gateway::ProcessFrames(std::uint32_t p_index)
+{
+  Connection &connection = connections_[p_index];
   std::size_t offset = 0;
   while (connection.fd_.IsOpen())
   {
@@ -401,10 +613,14 @@ bool Gateway::Append(std::uint32_t p_index, std::uint64_t p_seq, const M &p_mess
     {
       return false;
     }
-    std::memmove(connection.send_.data(), connection.send_.data() + connection.send_begin_,
-                 connection.send_end_ - connection.send_begin_);
-    connection.send_end_ -= connection.send_begin_;
-    connection.send_begin_ = 0;
+    // Bytes that a send in flight reads must stay where they are.
+    if (!connection.send_in_flight_)
+    {
+      std::memmove(connection.send_.data(), connection.send_.data() + connection.send_begin_,
+                   connection.send_end_ - connection.send_begin_);
+      connection.send_end_ -= connection.send_begin_;
+      connection.send_begin_ = 0;
+    }
     if (kSendBufferSize - connection.send_end_ < kSize)
     {
       return false;
@@ -423,6 +639,19 @@ bool Gateway::Append(std::uint32_t p_index, std::uint64_t p_seq, const M &p_mess
 }
 
 bool Gateway::Flush(std::uint32_t p_index)
+{
+  switch (sockets_.io_)
+  {
+  case GatewayIo::Epoll:
+    return FlushEpoll(p_index);
+  case GatewayIo::Uring:
+    SubmitSend(p_index);
+    return true;
+  }
+  return true;
+}
+
+bool Gateway::FlushEpoll(std::uint32_t p_index)
 {
   Connection &connection = connections_[p_index];
   while (connection.send_begin_ < connection.send_end_)
@@ -495,12 +724,257 @@ void Gateway::Close(std::uint32_t p_index)
     sessions_[*connection.session_].connection_.reset();
     connection.session_.reset();
   }
+  if (sockets_.io_ == GatewayIo::Uring)
+  {
+    // Issue a queued send of this fd before the fd closes, as epoll's Flush
+    // writes before Close. Then cancel what is in flight; the fd may close
+    // now, because each operation holds its own reference to the socket.
+    io_uring *const ring = sockets_.ring_.Get();
+    if (io_uring_sq_ready(ring) > 0)
+    {
+      static_cast<void>(io_uring_submit(ring));
+    }
+    if (connection.recv_in_flight_)
+    {
+      SubmitCancel(UserData(Op::Recv, connection.generation_, p_index), 0);
+    }
+    if (connection.send_in_flight_)
+    {
+      SubmitCancel(UserData(Op::Send, connection.generation_, p_index), 0);
+    }
+  }
   connection.fd_.Reset(); // closing the fd also removes it from the epoll set
   connection.read_size_ = 0;
   connection.send_begin_ = 0;
   connection.send_end_ = 0;
   connection.want_write_ = false;
-  free_connections_.push_back(p_index);
+  ReleaseIfIdle(p_index);
+}
+
+void Gateway::ReleaseIfIdle(std::uint32_t p_index)
+{
+  const Connection &connection = connections_[p_index];
+  if (!connection.recv_in_flight_ && !connection.send_in_flight_)
+  {
+    free_connections_.push_back(p_index);
+  }
+}
+
+void Gateway::StartUring()
+{
+  // The calling thread becomes the only thread that may submit. It fails only
+  // if the ring was not created disabled.
+  [[maybe_unused]] const int enabled = io_uring_enable_rings(sockets_.ring_.Get());
+  contract_assert(enabled == 0);
+  ArmAccept();
+}
+
+void Gateway::PollUring()
+{
+  io_uring *const ring = sockets_.ring_.Get();
+  if (io_uring_sq_ready(ring) > 0)
+  {
+    static_cast<void>(io_uring_submit(ring));
+  }
+  // At most one CQ's worth per pass. io_uring_peek_cqe enters the kernel only
+  // when completion work is pending (IORING_SQ_TASKRUN) or the CQ overflowed.
+  for (std::uint32_t budget = uring_cq_entries_; budget > 0; --budget)
+  {
+    io_uring_cqe *cqe = nullptr;
+    if (io_uring_peek_cqe(ring, &cqe) != 0)
+    {
+      break;
+    }
+    // Copy and release the entry first: a handler may submit, and the kernel
+    // may then post more entries.
+    const std::uint64_t user_data = io_uring_cqe_get_data64(cqe);
+    const std::int32_t result = cqe->res;
+    const std::uint32_t flags = cqe->flags;
+    io_uring_cqe_seen(ring, cqe);
+    OnCompletion(user_data, result, flags);
+  }
+}
+
+void Gateway::StopUring()
+{
+  // Cancel every operation, then wait until the kernel has returned every
+  // buffer. Completions are only counted; no protocol work runs.
+  SubmitCancel(0, IORING_ASYNC_CANCEL_ANY | IORING_ASYNC_CANCEL_ALL);
+  io_uring *const ring = sockets_.ring_.Get();
+  for (std::uint32_t wait = 0; uring_ops_ > 0 && wait < kStopWaits; ++wait)
+  {
+    io_uring_cqe *cqe = nullptr;
+    __kernel_timespec timeout{.tv_sec = 0, .tv_nsec = kStopWaitNanoseconds};
+    static_cast<void>(io_uring_submit_and_wait_timeout(ring, &cqe, 1, &timeout, nullptr));
+    while (io_uring_peek_cqe(ring, &cqe) == 0)
+    {
+      if (IsFinal(io_uring_cqe_get_data64(cqe), cqe->flags))
+      {
+        --uring_ops_;
+      }
+      io_uring_cqe_seen(ring, cqe);
+    }
+  }
+}
+
+void Gateway::OnCompletion(std::uint64_t p_user_data, std::int32_t p_result, std::uint32_t p_flags)
+{
+  if (IsFinal(p_user_data, p_flags))
+  {
+    --uring_ops_;
+  }
+  const Op op = OpOf(p_user_data);
+  if (op == Op::Accept)
+  {
+    OnAccepted(p_result, p_flags);
+    return;
+  }
+  if (op == Op::Cancel)
+  {
+    return; // the cancelled operation posts its own completion
+  }
+  const std::uint32_t index = IndexOf(p_user_data);
+  const Connection &connection = connections_[index];
+  // A slot is reused only after all its operations complete, so a completion
+  // from an older generation is not expected; it is ignored all the same.
+  if (GenerationOf(p_user_data) != connection.generation_)
+  {
+    return;
+  }
+  if (op == Op::Recv)
+  {
+    OnReceived(index, p_result);
+  }
+  else
+  {
+    OnSent(index, p_result);
+  }
+}
+
+void Gateway::OnAccepted(std::int32_t p_result, std::uint32_t p_flags)
+{
+  if ((p_flags & IORING_CQE_F_MORE) == 0)
+  {
+    ArmAccept(); // the multishot accept has ended, for example on an error
+  }
+  if (p_result >= 0)
+  {
+    Adopt(UniqueFd{p_result});
+  }
+}
+
+void Gateway::OnReceived(std::uint32_t p_index, std::int32_t p_result)
+{
+  Connection &connection = connections_[p_index];
+  if (!connection.recv_in_flight_)
+  {
+    return;
+  }
+  connection.recv_in_flight_ = false;
+  if (!connection.fd_.IsOpen())
+  {
+    ReleaseIfIdle(p_index);
+    return;
+  }
+  if (IsRetry(p_result))
+  {
+    ArmRecv(p_index);
+    return;
+  }
+  if (p_result <= 0)
+  {
+    Close(p_index);
+    return;
+  }
+  connection.read_size_ += static_cast<std::size_t>(p_result);
+  ProcessFrames(p_index);
+  if (connection.fd_.IsOpen())
+  {
+    ArmRecv(p_index);
+  }
+}
+
+void Gateway::OnSent(std::uint32_t p_index, std::int32_t p_result)
+{
+  Connection &connection = connections_[p_index];
+  if (!connection.send_in_flight_)
+  {
+    return;
+  }
+  connection.send_in_flight_ = false;
+  if (!connection.fd_.IsOpen())
+  {
+    ReleaseIfIdle(p_index);
+    return;
+  }
+  if (IsRetry(p_result))
+  {
+    SubmitSend(p_index);
+    return;
+  }
+  if (p_result <= 0)
+  {
+    Close(p_index);
+    return;
+  }
+  connection.send_begin_ += static_cast<std::size_t>(p_result);
+  if (connection.send_begin_ == connection.send_end_)
+  {
+    connection.send_begin_ = 0;
+    connection.send_end_ = 0;
+    return;
+  }
+  SubmitSend(p_index); // the rest of this send, and what was appended meanwhile
+}
+
+void Gateway::ArmAccept()
+{
+  if (stop_.load(std::memory_order_relaxed))
+  {
+    return;
+  }
+  io_uring_sqe *const sqe = GetSqe(sockets_.ring_.Get());
+  io_uring_prep_multishot_accept(sqe, sockets_.listener_.Get(), nullptr, nullptr,
+                                 SOCK_NONBLOCK | SOCK_CLOEXEC);
+  io_uring_sqe_set_data64(sqe, UserData(Op::Accept, 0, 0));
+  ++uring_ops_;
+}
+
+void Gateway::ArmRecv(std::uint32_t p_index)
+{
+  Connection &connection = connections_[p_index];
+  // Compaction leaves less than one frame, and the buffer holds several.
+  contract_assert(connection.read_size_ < kReadBufferSize);
+  contract_assert(!connection.recv_in_flight_);
+  const std::span<std::byte> space = std::span{connection.read_}.subspan(connection.read_size_);
+  io_uring_sqe *const sqe = GetSqe(sockets_.ring_.Get());
+  io_uring_prep_recv(sqe, connection.fd_.Get(), space.data(), space.size(), 0);
+  io_uring_sqe_set_data64(sqe, UserData(Op::Recv, connection.generation_, p_index));
+  connection.recv_in_flight_ = true;
+  ++uring_ops_;
+}
+
+void Gateway::SubmitSend(std::uint32_t p_index)
+{
+  Connection &connection = connections_[p_index];
+  if (connection.send_in_flight_ || connection.send_begin_ == connection.send_end_)
+  {
+    return;
+  }
+  const std::span<const std::byte> unsent = std::span{connection.send_}.subspan(
+      connection.send_begin_, connection.send_end_ - connection.send_begin_);
+  io_uring_sqe *const sqe = GetSqe(sockets_.ring_.Get());
+  io_uring_prep_send(sqe, connection.fd_.Get(), unsent.data(), unsent.size(), MSG_NOSIGNAL);
+  io_uring_sqe_set_data64(sqe, UserData(Op::Send, connection.generation_, p_index));
+  connection.send_in_flight_ = true;
+  ++uring_ops_;
+}
+
+void Gateway::SubmitCancel(std::uint64_t p_user_data, int p_flags)
+{
+  io_uring_sqe *const sqe = GetSqe(sockets_.ring_.Get());
+  io_uring_prep_cancel64(sqe, p_user_data, p_flags);
+  io_uring_sqe_set_data64(sqe, UserData(Op::Cancel, 0, 0));
 }
 
 } // namespace mex

@@ -55,8 +55,11 @@ Configure fails if CMake is not using Ninja (`-G Ninja` or the preset above), if
 `mex_exchange` reads one config file ([`config/example.cfg`](config/example.cfg) documents the syntax), starts one pinned thread per engine and a gateway thread, and stops on SIGINT or SIGTERM. A core that cannot be pinned is a warning, not an error.
 
 ```bash
-./build/mex_exchange config/example.cfg
+./build/mex_exchange config/example.cfg              # epoll client I/O (default)
+./build/mex_exchange config/example.cfg --io uring   # io_uring client I/O
 ```
+
+The io_uring backend needs liburing (`pkg-config liburing`) to build; see [Client I/O](docs/performance.md#client-io).
 
 `mex_loadgen` logs on as one session, sends a mix of NewOrder, Cancel, and Replace, and prints throughput and NewOrder -> first report latency. It exits non-zero if logon fails, a seq gap is seen, the connection fails, or a request is rejected as `DuplicateRequest`. `--help` lists the options.
 
