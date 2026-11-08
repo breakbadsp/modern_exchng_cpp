@@ -49,7 +49,7 @@ int RunReplicatedExchange(const Config &p_config, const ReplicaArguments &p_argu
                                      .count());
   Config config = p_config;
   config.gateway_.port_ = config.replicas_[p_arguments.replica_].gateway_port_;
-  auto sockets = OpenGatewaySockets(config.gateway_);
+  auto sockets = OpenGatewaySockets(config.gateway_, p_arguments.io_);
   if (!sockets.has_value())
   {
     std::println(stderr, "mex_exchange: {}", sockets.error());

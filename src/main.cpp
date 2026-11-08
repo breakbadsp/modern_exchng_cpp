@@ -18,9 +18,11 @@
 #include <functional>
 #include <latch>
 #include <memory>
+#include <optional>
 #include <print>
 #include <pthread.h>
 #include <sched.h>
+#include <span>
 #include <stop_token>
 #include <string_view>
 #include <system_error>
@@ -38,6 +40,7 @@ using mex::Config;
 using mex::Engine;
 using mex::EngineQueues;
 using mex::Gateway;
+using mex::GatewayIo;
 using mex::Report;
 using mex::SpscQueue;
 
@@ -50,6 +53,24 @@ constexpr std::size_t kThreadNameBytes = 16;
 // Set by the signal handler. A lock-free atomic store is signal-safe.
 std::atomic<bool> stop_requested{false};
 static_assert(std::atomic<bool>::is_always_lock_free);
+
+[[nodiscard]] std::optional<GatewayIo> ParseGatewayIo(std::string_view p_text)
+{
+  if (p_text == "epoll")
+  {
+    return GatewayIo::Epoll;
+  }
+  if (p_text == "uring")
+  {
+    return GatewayIo::Uring;
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::string_view NameOf(GatewayIo p_io)
+{
+  return p_io == GatewayIo::Uring ? "uring" : "epoll";
+}
 
 void OnStopSignal(int) { stop_requested.store(true, std::memory_order_relaxed); }
 
@@ -130,14 +151,14 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
   p_slot.stalls_ = engine.OutboundStalls();
 }
 
-[[nodiscard]] int RunExchange(const Config &p_config)
+[[nodiscard]] int RunExchange(const Config &p_config, GatewayIo p_io)
 {
   if (const auto installed = InstallStopHandler(); !installed.has_value())
   {
     std::println(stderr, "mex_exchange: sigaction: {}", std::strerror(installed.error()));
     return kExitFailure;
   }
-  auto sockets = mex::OpenGatewaySockets(p_config.gateway_);
+  auto sockets = mex::OpenGatewaySockets(p_config.gateway_, p_io);
   if (!sockets.has_value())
   {
     std::println(stderr, "mex_exchange: {}", sockets.error());
@@ -172,8 +193,8 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
         }
         gateway_ptr->Run();
       }};
-  std::println("mex_exchange: listening on {}:{} with {} engines",
-               p_config.gateway_.listen_address_, port, slots.size());
+  std::println("mex_exchange: listening on {}:{} with {} engines, io {}",
+               p_config.gateway_.listen_address_, port, slots.size(), NameOf(p_io));
   std::fflush(stdout);
 
   while (!stop_requested.load(std::memory_order_relaxed))
@@ -203,28 +224,38 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
 
 int main(int p_argc, char **p_argv)
 {
-  constexpr int kSingleArgCount = 2;     // <config path>
-  constexpr int kReplicatedArgCount = 4; // <config path> <replica> <data path>
-  if (p_argc != kSingleArgCount && p_argc != kReplicatedArgCount)
+  // <config path> [--io epoll|uring] [<replica number> <data path>]
+  const std::span<char *const> args{p_argv, static_cast<std::size_t>(p_argc)};
+  std::optional<GatewayIo> io = GatewayIo::Epoll;
+  std::size_t next = 2;
+  if (args.size() >= 4 && std::string_view{args[2]} == "--io")
   {
-    std::println(stderr, "usage: mex_exchange <config path> [<replica number> <data path>]");
+    io = ParseGatewayIo(args[3]);
+    next = 4;
+  }
+  const std::size_t rest = args.size() >= next ? args.size() - next : 1;
+  if ((rest != 0 && rest != 2) || !io.has_value())
+  {
+    std::println(stderr, "usage: mex_exchange <config path> [--io epoll|uring] "
+                         "[<replica number> <data path>]");
     return kExitUsage;
   }
-  const auto config = mex::LoadConfig(p_argv[1]);
+  const char *const path = args[1];
+  const auto config = mex::LoadConfig(path);
   if (!config.has_value())
   {
     const mex::ConfigError &error = config.error();
     if (error.line_ == 0)
     {
-      std::println(stderr, "mex_exchange: {}: {}", p_argv[1], error.reason_);
+      std::println(stderr, "mex_exchange: {}: {}", path, error.reason_);
     }
     else
     {
-      std::println(stderr, "mex_exchange: {}:{}: {}", p_argv[1], error.line_, error.reason_);
+      std::println(stderr, "mex_exchange: {}:{}: {}", path, error.line_, error.reason_);
     }
     return kExitFailure;
   }
-  const bool replicated = p_argc == kReplicatedArgCount;
+  const bool replicated = rest == 2;
   if (replicated != !config->replicas_.empty())
   {
     std::println(stderr, "mex_exchange: a config with replica records needs <replica number> "
@@ -233,9 +264,9 @@ int main(int p_argc, char **p_argv)
   }
   if (!replicated)
   {
-    return RunExchange(*config);
+    return RunExchange(*config, *io);
   }
-  const std::string_view replica_text{p_argv[2]};
+  const std::string_view replica_text{args[next]};
   std::uint8_t replica = 0;
   const auto parsed =
       std::from_chars(replica_text.data(), replica_text.data() + replica_text.size(), replica);
@@ -251,6 +282,6 @@ int main(int p_argc, char **p_argv)
     std::println(stderr, "mex_exchange: sigaction: {}", std::strerror(installed.error()));
     return kExitFailure;
   }
-  return mex::RunReplicatedExchange(*config, {.replica_ = replica, .data_path_ = p_argv[3]},
-                                    stop_requested);
+  return mex::RunReplicatedExchange(
+      *config, {.replica_ = replica, .data_path_ = args[next + 1], .io_ = *io}, stop_requested);
 }

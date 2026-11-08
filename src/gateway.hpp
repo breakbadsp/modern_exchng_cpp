@@ -24,6 +24,13 @@
 // back to the sessions.
 // It never blocks: a full inbound queue is a SystemBusy reject, and a client
 // whose send buffer is full is disconnected.
+//
+// Two client I/O backends share all of this logic and differ only in how bytes
+// move: level-triggered epoll with recv/send syscalls, or io_uring with one
+// outstanding recv and at most one outstanding send per connection.
+
+struct io_uring;
+
 namespace mex
 {
 
@@ -47,17 +54,49 @@ private:
   int fd_ = -1;
 };
 
-// The listening socket and the epoll set that already watches it.
+// Owns one io_uring instance; empty means none. io_uring is complete only in
+// gateway.cpp, so the members that destroy it are defined there.
+class UniqueRing final
+{
+public:
+  UniqueRing();
+  ~UniqueRing();
+  UniqueRing(const UniqueRing &) = delete;
+  UniqueRing &operator=(const UniqueRing &) = delete;
+  UniqueRing(UniqueRing &&p_other) noexcept;
+  UniqueRing &operator=(UniqueRing &&p_other) noexcept;
+
+  // Startup only. p_flags are IORING_SETUP_* flags. Returns the error number on failure.
+  [[nodiscard]] static std::expected<UniqueRing, int>
+  Create(std::uint32_t p_sq_entries, std::uint32_t p_cq_entries, std::uint32_t p_flags);
+
+  [[nodiscard]] io_uring *Get() const { return ring_.get(); }
+  void Reset();
+
+private:
+  std::unique_ptr<io_uring> ring_{}; // set only after a successful setup
+};
+
+enum class GatewayIo : std::uint8_t
+{
+  Epoll = 0,
+  Uring,
+};
+
+// The listening socket and the poller of the chosen backend: an epoll set that
+// already watches the listener, or a ring that the gateway thread enables.
 struct GatewaySockets
 {
   UniqueFd listener_{};
-  UniqueFd epoll_{};
+  UniqueFd epoll_{};       // GatewayIo::Epoll only
+  UniqueRing ring_{};      // GatewayIo::Uring only
   std::uint16_t port_ = 0; // the bound port; differs from the config when it asks for 0
+  GatewayIo io_ = GatewayIo::Epoll;
 };
 
 // Startup only. Binds and listens on the configured address and port.
 [[nodiscard]] std::expected<GatewaySockets, std::string>
-OpenGatewaySockets(const GatewayConfig &p_config);
+OpenGatewaySockets(const GatewayConfig &p_config, GatewayIo p_io);
 
 // The queue pair of one engine. The gateway is the producer of inbound_ and
 // the consumer of outbound_.
@@ -68,8 +107,9 @@ struct EngineQueues
 };
 
 // Per-connection buffers, fixed at startup. A frame that does not fit in the
-// send buffer, after a write attempt, disconnects that client. The kernel
-// socket buffer comes first, so this buffer only holds what the kernel refused.
+// send buffer, after a write attempt, disconnects that client. With epoll the
+// kernel socket buffer comes first, so this buffer only holds what the kernel
+// refused. With io_uring it also holds what was appended while a send is in flight.
 constexpr std::size_t kReadBufferSize = 64 * wire::kMaxFrameSize;
 constexpr std::size_t kSendBufferSize = 1024 * wire::kMaxFrameSize;
 
@@ -80,14 +120,16 @@ public:
   // p_queues[i] belongs to p_config.engines_[i]. All storage is allocated here.
   Gateway(const Config &p_config, GatewaySockets p_sockets, std::span<const EngineQueues> p_queues)
     pre (p_queues.size() == p_config.engines_.size())
-    pre (p_config.gateway_.max_connections_ > 0);
+    pre (p_config.gateway_.max_connections_ > 0)
+    pre (p_sockets.io_ != GatewayIo::Uring || p_sockets.ring_.Get() != nullptr);
   Gateway(const Gateway &) = delete;
   Gateway &operator=(const Gateway &) = delete;
   Gateway(Gateway &&) = delete;
   Gateway &operator=(Gateway &&) = delete;
   ~Gateway();
 
-  // Gateway thread only. Busy-polls sockets and outbound queues until Stop().
+  // Gateway thread only, called once. Busy-polls sockets and outbound queues
+  // until Stop(). With io_uring it then cancels its I/O and waits for it.
   void Run();
 
   // Any thread.
@@ -105,8 +147,13 @@ private:
   };
 
   void PollOnce();
+  void PollEpoll();
   void Accept();
+  // Sets up an accepted socket in a free slot, or closes it if there is none.
+  void Adopt(UniqueFd p_fd);
   void OnReadable(std::uint32_t p_index);
+  // Handles every complete frame in the read buffer, then keeps the partial rest.
+  void ProcessFrames(std::uint32_t p_index);
   void OnFrame(std::uint32_t p_index, const wire::ClientMessage &p_message);
   void OnLogon(std::uint32_t p_index, const wire::Logon &p_logon);
   template <typename O> void OnOrder(SessionId p_session, const O &p_order);
@@ -119,14 +166,32 @@ private:
   // Encodes p_message; returns false if it does not fit even after a write.
   template <typename M> [[nodiscard]] bool Append(std::uint32_t p_index, std::uint64_t p_seq, const M &p_message);
 
-  // Writes what the kernel takes and waits for EPOLLOUT for the rest. Returns
-  // false if it closed the connection.
+  // Epoll: writes what the kernel takes and waits for EPOLLOUT for the rest.
+  // io_uring: submits a send of the unsent bytes unless one is in flight.
+  // Returns false if it closed the connection.
   bool Flush(std::uint32_t p_index);
+  bool FlushEpoll(std::uint32_t p_index);
   void FlushPending();
   [[nodiscard]] bool SetWriteInterest(std::uint32_t p_index, bool p_want_write);
 
-  // Frees the connection and its session. Does nothing if already closed.
+  // io_uring backend. The kernel owns a connection's read buffer while its recv
+  // is in flight, and the in-flight range of its send buffer while its send is.
+  void StartUring();
+  void PollUring();
+  void StopUring();
+  void OnCompletion(std::uint64_t p_user_data, std::int32_t p_result, std::uint32_t p_flags);
+  void OnAccepted(std::int32_t p_result, std::uint32_t p_flags);
+  void OnReceived(std::uint32_t p_index, std::int32_t p_result);
+  void OnSent(std::uint32_t p_index, std::int32_t p_result);
+  void ArmAccept();
+  void ArmRecv(std::uint32_t p_index);
+  void SubmitSend(std::uint32_t p_index);
+  void SubmitCancel(std::uint64_t p_user_data, int p_flags);
+
+  // Frees the connection and its session. Does nothing if already closed. The
+  // slot is reused only after the kernel has returned all of its buffers.
   void Close(std::uint32_t p_index);
+  void ReleaseIfIdle(std::uint32_t p_index);
 
   std::vector<SymbolConfig> routes_{}; // sorted by symbol_id_
   std::vector<SessionConfig> session_configs_{};
@@ -141,6 +206,8 @@ private:
   GatewaySockets sockets_;
   static constexpr std::size_t kMaxEvents = 64;
   std::array<epoll_event, kMaxEvents> events_{};
+  std::uint32_t uring_ops_ = 0; // accept, recv, and send ops not yet completed
+  std::uint32_t uring_cq_entries_ = 0;
   std::atomic<bool> stop_{false};
   std::atomic<std::uint64_t> dropped_reports_{0};
 };
