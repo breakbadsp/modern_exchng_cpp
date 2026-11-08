@@ -108,8 +108,6 @@ public:
   [[nodiscard]] std::uint32_t MaxOrders() const;
 
 private:
-  void ClearFills();
-
   [[nodiscard]] Quantity Match(Side p_aggressor, const Price *p_limit_price, Quantity p_quantity);
 
   [[nodiscard]] bool CanRestAfterRemoving(OrderId p_order_id, Price p_price) const
@@ -126,13 +124,6 @@ private:
   // slower (docs/client-profile.md).
   [[nodiscard]] OrderId Rest(Side p_side, Price p_price, Quantity p_quantity)
     pre (p_quantity > Quantity{});
-
-  void Unlink(PriceLevel &p_level, OrderId p_order_id)
-    pre (p_order_id < pool_size_);
-
-  void Release(OrderId p_order_id)
-    pre (p_order_id < pool_size_)
-    pre (free_count_ < pool_size_);
 
   [[nodiscard]] PriceLadder &Levels(Side p_side);
   [[nodiscard]] const PriceLadder &Levels(Side p_side) const;

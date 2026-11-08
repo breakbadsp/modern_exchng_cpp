@@ -72,29 +72,7 @@ namespace
   return result;
 }
 
-[[nodiscard]] SubmitResult Rejected(Quantity p_remaining)
-{
-  SubmitResult result;
-  result.status_ = SubmitStatus::Rejected;
-  result.filled_qty_ = Quantity{};
-  result.remaining_ = p_remaining;
-  result.order_id_ = kInvalidOrderId;
-  return result;
-}
-
-void AddLevelQty(PriceLevel &p_level, Quantity p_quantity) pre(p_quantity > Quantity{})
-    pre(p_level.total_qty_ <= std::numeric_limits<std::uint64_t>::max() - p_quantity.units_)
-{
-  p_level.total_qty_ += p_quantity.units_;
-  ++p_level.order_count_;
-}
-
-void SubLevelQty(PriceLevel &p_level, Quantity p_quantity) pre(p_quantity > Quantity{})
-    pre(p_level.total_qty_ >= p_quantity.units_) pre(p_level.order_count_ > 0)
-{
-  p_level.total_qty_ -= p_quantity.units_;
-  --p_level.order_count_;
-}
+[[nodiscard]] SubmitResult Rejected(Quantity p_remaining) { return {.remaining_ = p_remaining}; }
 
 void UnlinkNode(OrderNode *p_pool, std::uint32_t p_pool_size, PriceLevel &p_level,
                 OrderId p_order_id)
@@ -195,7 +173,11 @@ void AppendToLevel(OrderNode *p_pool, std::uint32_t p_pool_size, PriceLevel &p_l
   node.next_ = kInvalidOrderId;
   p_pool[p_level.tail_].next_ = p_order_id;
   p_level.tail_ = p_order_id;
-  AddLevelQty(p_level, p_quantity);
+  contract_assert(p_quantity > Quantity{});
+  contract_assert(p_level.total_qty_ <=
+                  std::numeric_limits<std::uint64_t>::max() - p_quantity.units_);
+  p_level.total_qty_ += p_quantity.units_;
+  ++p_level.order_count_;
 }
 
 } // namespace
@@ -276,11 +258,9 @@ Book::Book(std::uint32_t p_max_orders, std::uint32_t p_max_price_levels)
   }
 }
 
-void Book::ClearFills() { fill_count_ = 0; }
-
 SubmitResult Book::SubmitLimitOrder(Side p_side, Price p_price, const Quantity p_quantity)
 {
-  ClearFills();
+  fill_count_ = 0;
   contract_assert(IsBuy(p_side) || IsSell(p_side));
   if (p_quantity == Quantity{})
   {
@@ -312,7 +292,7 @@ SubmitResult Book::SubmitLimitOrder(Side p_side, Price p_price, const Quantity p
 
 SubmitResult Book::SubmitMarketOrder(Side p_side, const Quantity p_quantity)
 {
-  ClearFills();
+  fill_count_ = 0;
   contract_assert(IsBuy(p_side) || IsSell(p_side));
   if (p_quantity == Quantity{})
   {
@@ -341,9 +321,10 @@ bool Book::CancelOrder(const OrderId p_order_id)
   const std::uint32_t index = LevelIndex(p_order_id);
   PriceLevel &level = levels[index];
   contract_assert(level.total_qty_ >= node.quantity_.units_);
-  Unlink(level, p_order_id);
-  SubLevelQty(level, node.quantity_);
-  Release(p_order_id);
+  UnlinkNode(pool_.get(), pool_size_, level, p_order_id);
+  level.total_qty_ -= node.quantity_.units_;
+  --level.order_count_;
+  ReleaseSlot(pool_.get(), pool_size_, free_ids_.get(), free_count_, p_order_id);
 
   if (level.order_count_ == 0)
   {
@@ -378,7 +359,7 @@ bool Book::ReduceOrder(const OrderId p_order_id, const Quantity p_new_quantity)
 SubmitResult Book::ReplaceOrder(const OrderId p_order_id, Price p_new_price,
                                 const Quantity p_new_quantity)
 {
-  ClearFills();
+  fill_count_ = 0;
   // Check everything before the book changes, so a reject leaves the order as it was.
   if (!IsResting(p_order_id) || !CanRestAfterRemoving(p_order_id, p_new_price))
   {
@@ -531,16 +512,6 @@ OrderId Book::Rest(Side p_side, Price p_price, Quantity p_quantity)
   level.total_qty_ = p_quantity.units_;
   levels.Insert(index, level);
   return order_id;
-}
-
-void Book::Unlink(PriceLevel &p_level, OrderId p_order_id)
-{
-  UnlinkNode(pool_.get(), pool_size_, p_level, p_order_id);
-}
-
-void Book::Release(OrderId p_order_id)
-{
-  ReleaseSlot(pool_.get(), pool_size_, free_ids_.get(), free_count_, p_order_id);
 }
 
 PriceLadder &Book::Levels(Side p_side)
