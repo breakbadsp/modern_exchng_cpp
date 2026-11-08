@@ -123,6 +123,14 @@ target_include_directories(bench_book PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(bench_book PRIVATE -O3 -DNDEBUG -fcontract-evaluation-semantic=ignore
     -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
 
+# One synchronous client flow through the public Book API. -g and frame pointers
+# let perf attribute samples. See docs/client-profile.md.
+add_executable(bench_client tests/client_bench.cpp src/book.cpp)
+target_include_directories(bench_client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_options(bench_client PRIVATE -O3 -g -DNDEBUG -fno-omit-frame-pointer
+    -fcontract-evaluation-semantic=ignore
+    -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+
 # The exchange and the load generator are measured end to end, so they build at
 # -O3 like bench_book. The exchange compiles the sources itself, because mex is
 # built with the preset's flags. Contracts stay on in the exchange.
@@ -153,6 +161,8 @@ add_test(NAME exchange_smoke
         ${CMAKE_CURRENT_SOURCE_DIR}/config/example.cfg
         ${CMAKE_CURRENT_BINARY_DIR}/exchange_smoke)
 set_tests_properties(exchange_smoke PROPERTIES TIMEOUT 60)
+# The flow checks its fill totals and final book state; contracts are off here.
+add_test(NAME bench_client_smoke COMMAND bench_client batch 1000 64)
 
 find_program(CLANG_FORMAT_EXECUTABLE NAMES clang-format)
 if(CLANG_FORMAT_EXECUTABLE)
@@ -173,6 +183,7 @@ if(CLANG_FORMAT_EXECUTABLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_bench.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_checks.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/book_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/client_bench.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/config_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/engine_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_session_test.cpp

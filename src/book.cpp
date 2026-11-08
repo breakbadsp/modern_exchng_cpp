@@ -287,7 +287,11 @@ SubmitResult Book::SubmitLimitOrder(Side p_side, Price p_price, const Quantity p
     return Rejected(Quantity{});
   }
 
-  const Quantity filled = Match(p_side, &p_price, p_quantity);
+  // A limit order that does not cross skips the Match call. This measured
+  // faster for resting orders and slower for crossing ones (docs/client-profile.md).
+  const PriceLadder &makers = Levels(Opposite(p_side));
+  const bool crosses = !makers.empty() && Crosses(p_side, p_price, makers.back().price_);
+  const Quantity filled = crosses ? Match(p_side, &p_price, p_quantity) : Quantity{};
   const Quantity remaining = p_quantity - filled;
   if (remaining == Quantity{})
   {
@@ -295,18 +299,14 @@ SubmitResult Book::SubmitLimitOrder(Side p_side, Price p_price, const Quantity p
   }
 
   // Matching runs first because a fill can free the slot or the level this
-  // remainder needs. A reject with no fills has not changed the book.
-  // A partial fill that then cannot rest keeps the fills and drops the rest.
-  if (!CanRest(p_side, p_price))
-  {
-    if (filled == Quantity{})
-    {
-      return Rejected(p_quantity);
-    }
-    return Accepted(filled, remaining, kInvalidOrderId);
-  }
-
+  // remainder needs. Rest checks for room before it changes the book, so a
+  // reject with no fills has not changed the book. A partial fill that then
+  // cannot rest keeps the fills and drops the rest.
   const OrderId order_id = Rest(p_side, p_price, remaining);
+  if (order_id == kInvalidOrderId && filled == Quantity{})
+  {
+    return Rejected(p_quantity);
+  }
   return Accepted(filled, remaining, order_id);
 }
 
@@ -448,23 +448,6 @@ Quantity Book::Match(Side p_aggressor, const Price *p_limit_price, Quantity p_qu
   return p_quantity - remaining;
 }
 
-bool Book::CanRest(Side p_side, Price p_price) const
-{
-  if (free_count_ == 0)
-  {
-    return false;
-  }
-
-  const PriceLadder &levels = Levels(p_side);
-  const std::uint32_t index = FindLevel(levels.begin(), static_cast<std::uint32_t>(levels.size()),
-                                        p_price, Ascending(p_side));
-  if (index < levels.size() && levels[index].price_ == p_price)
-  {
-    return true;
-  }
-  return levels.size() < static_cast<std::size_t>(max_price_levels_);
-}
-
 // Exact, not conservative: matching only removes levels on the other side, so the
 // only change to this side before the rest is the removal of p_order_id itself.
 // The pool has room, because the removal frees a slot.
@@ -506,7 +489,21 @@ std::uint32_t Book::LevelIndex(OrderId p_order_id) const
 
 OrderId Book::Rest(Side p_side, Price p_price, Quantity p_quantity)
 {
-  contract_assert(free_count_ > 0);
+  if (free_count_ == 0)
+  {
+    return kInvalidOrderId;
+  }
+
+  // One search serves both the room check and the insert.
+  PriceLadder &levels = Levels(p_side);
+  const std::uint32_t index = FindLevel(levels.begin(), static_cast<std::uint32_t>(levels.size()),
+                                        p_price, Ascending(p_side));
+  const bool level_exists = index < levels.size() && levels[index].price_ == p_price;
+  if (!level_exists && levels.size() >= static_cast<std::size_t>(max_price_levels_))
+  {
+    return kInvalidOrderId;
+  }
+
   --free_count_;
   const OrderId order_id = free_ids_[free_count_];
   contract_assert(order_id < pool_size_);
@@ -518,10 +515,7 @@ OrderId Book::Rest(Side p_side, Price p_price, Quantity p_quantity)
   node.side_ = p_side;
   node.next_ = kInvalidOrderId;
 
-  PriceLadder &levels = Levels(p_side);
-  const std::uint32_t index = FindLevel(levels.begin(), static_cast<std::uint32_t>(levels.size()),
-                                        p_price, Ascending(p_side));
-  if (index < levels.size() && levels[index].price_ == p_price)
+  if (level_exists)
   {
     AppendToLevel(pool_.get(), pool_size_, levels[index], order_id, p_quantity);
     return order_id;

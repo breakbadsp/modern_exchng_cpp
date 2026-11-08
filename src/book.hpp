@@ -112,8 +112,6 @@ private:
 
   [[nodiscard]] Quantity Match(Side p_aggressor, const Price *p_limit_price, Quantity p_quantity);
 
-  [[nodiscard]] bool CanRest(Side p_side, Price p_price) const;
-
   [[nodiscard]] bool CanRestAfterRemoving(OrderId p_order_id, Price p_price) const
     pre (p_order_id < pool_size_);
 
@@ -122,8 +120,11 @@ private:
   [[nodiscard]] std::uint32_t LevelIndex(OrderId p_order_id) const
     pre (p_order_id < pool_size_);
 
-  OrderId Rest(Side p_side, Price p_price, Quantity p_quantity)
-    pre (free_count_ > 0)
+  // kInvalidOrderId, and the book does not change, when no slot is free or the
+  // price needs a new level and the ladder is full. kInvalidOrderId is also how
+  // SubmitResult says that nothing rests. A std::optional return measured
+  // slower (docs/client-profile.md).
+  [[nodiscard]] OrderId Rest(Side p_side, Price p_price, Quantity p_quantity)
     pre (p_quantity > Quantity{});
 
   void Unlink(PriceLevel &p_level, OrderId p_order_id)

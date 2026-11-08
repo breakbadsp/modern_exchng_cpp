@@ -38,7 +38,7 @@ ctest --preset ninja-asan-ubsan --output-on-failure
 
 Or pass `-DMEX_ENABLE_ASAN=ON` and/or `-DMEX_ENABLE_UBSAN=ON` to a Ninja configure.
 
-Binaries land in `build/` (or `build-asan-ubsan/`): static library `libmex.a`, the tests, benchmark `bench_book`, the exchange `mex_exchange`, and the load generator `mex_loadgen`.
+Binaries land in `build/` (or `build-asan-ubsan/`): static library `libmex.a`, the tests, benchmarks `bench_book` and `bench_client`, the exchange `mex_exchange`, and the load generator `mex_loadgen`.
 
 Configure fails if CMake is not using Ninja (`-G Ninja` or the preset above), if the compiler is not GCC 16+, or if `-fcontracts` does not compile.
 
@@ -80,11 +80,15 @@ p50 / p99 / max latency from a separate per-op-timed pass. Rerun locally after c
 
 Methodology, the end-to-end result, and full table: [`docs/performance.md`](docs/performance.md).
 
+`bench_client` runs one in-process client flow through the book API. Its results, CPU
+profiles, and the profiling scripts: [`docs/client-profile.md`](docs/client-profile.md).
+
 ## Layout
 
 ```
 src/          Book, protocol, queue, engine, gateway, config, and the exchange main
 tools/        load generator client
+scripts/      benchmark comparison and CPU profiling of the book
 tests/        Google Test suites, the end-to-end smoke test, and book_checks helpers
 prep/         design spec and requirements
 docs/         naming and C++ standards reference

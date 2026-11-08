@@ -2,6 +2,8 @@
 
 Book numbers come from `bench_book` (`tests/book_bench.cpp`), which compiles `src/book.cpp` at **`-O3 -DNDEBUG`**. The main test binary uses the Debug CMake preset; do not use it to judge throughput. End-to-end numbers (exchange and load generator over TCP) are in [End to end](#end-to-end-exchange-and-load-generator) and [many clients](#end-to-end-many-clients-one-symbol-each). How the gateway does client I/O, epoll compared with io_uring, and a comparison with TigerBeetle are in [Client I/O](#client-io).
 
+A single in-process client flow (`bench_client`), its CPU profile, and the measured effect of the last `Rest` and `SubmitLimitOrder` changes are in [the single-client profile](client-profile.md).
+
 **Design target** ([`prep/requirements.md`](../prep/requirements.md)): **100k–500k+** order operations per second, single thread.
 
 ## What is measured
