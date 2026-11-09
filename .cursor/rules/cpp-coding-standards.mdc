@@ -4,4 +4,7 @@ globs: "**/*.{cpp,hpp,h,cc,cxx,hxx,hh,ipp,tpp,ixx,cppm}"
 alwaysApply: false
 ---
 
-Follow `AGENTS.md` and `docs/cpp-coding-standards.md` for C++ work.
+For C++ work, read `AGENTS.md`, `docs/cpp-coding-standards.md`, and
+`.agents/skills/cpp-principles/SKILL.md`. Read the applicable `cpp-*` topic
+skills in `.agents/skills` for the current work, and `cpp-checklist` before
+completion or review.
