@@ -142,9 +142,7 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
   const std::uint16_t port = sockets->port_;
 
   std::vector<std::unique_ptr<EngineSlot>> slots;
-  slots.reserve(p_config.engines_.size());
   std::vector<EngineQueues> queues;
-  queues.reserve(p_config.engines_.size());
   for (const mex::EngineConfig &engine_config : p_config.engines_)
   {
     slots.push_back(std::make_unique<EngineSlot>(engine_config, p_config.gateway_));
@@ -153,7 +151,6 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
 
   std::latch engines_ready{static_cast<std::ptrdiff_t>(slots.size())};
   std::vector<std::jthread> engine_threads;
-  engine_threads.reserve(slots.size());
   for (std::size_t index = 0; index < slots.size(); ++index)
   {
     engine_threads.emplace_back(RunEngine, std::ref(*slots[index]), std::ref(engines_ready), index);

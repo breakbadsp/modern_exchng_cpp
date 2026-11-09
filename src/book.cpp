@@ -64,12 +64,10 @@ namespace
 [[nodiscard]] SubmitResult Accepted(Quantity p_filled_qty, Quantity p_remaining, OrderId p_order_id)
 {
   contract_assert(p_order_id == kInvalidOrderId || p_remaining > Quantity{});
-  SubmitResult result;
-  result.status_ = SubmitStatus::Accepted;
-  result.filled_qty_ = p_filled_qty;
-  result.remaining_ = p_remaining;
-  result.order_id_ = p_order_id;
-  return result;
+  return {.status_ = SubmitStatus::Accepted,
+          .filled_qty_ = p_filled_qty,
+          .remaining_ = p_remaining,
+          .order_id_ = p_order_id};
 }
 
 [[nodiscard]] SubmitResult Rejected(Quantity p_remaining) { return {.remaining_ = p_remaining}; }
