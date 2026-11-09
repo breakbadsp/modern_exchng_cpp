@@ -1,0 +1,22 @@
+Events disabled
+Events enabled
+Events disabled
+summary,perf,levels,1,operations,160000000,wall_ns_per_op,39.045,cpu_ns_per_op,12.003,user_cpu_ns,1920747000,system_cpu_ns,0,checksum,780980200002
+
+ Performance counter stats for 'taskset -c 2 /home/daksh/src/modern_exchng_cpp/build/profile_cache_branch_20261108/build/bench_client perf 20000000 1':
+
+           1925.92 msec task-clock:u
+        7827969385      cycles:u
+       23360005720      instructions:u
+        3680003407      branches:u
+              8998      branch-misses:u
+            150390      cache-references:u
+             43618      cache-misses:u
+                 0      context-switches:u
+                 0      cpu-migrations:u
+                 2      page-faults:u
+
+       6.261723018 seconds time elapsed
+
+       0.000000000 seconds user
+       0.000000000 seconds sys
