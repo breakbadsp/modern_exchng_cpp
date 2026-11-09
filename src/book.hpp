@@ -110,7 +110,8 @@ public:
 private:
   [[nodiscard]] Quantity Match(Side p_aggressor, const Price *p_limit_price, Quantity p_quantity);
 
-  [[nodiscard]] bool CanRestAfterRemoving(OrderId p_order_id, Price p_price) const
+  // p_level_index is LevelIndex(p_order_id). The caller has it, so it is not searched again.
+  void RemoveOrder(OrderId p_order_id, std::uint32_t p_level_index)
     pre (p_order_id < pool_size_);
 
   [[nodiscard]] bool IsResting(OrderId p_order_id) const;
@@ -124,6 +125,11 @@ private:
   // slower (docs/client-profile.md).
   [[nodiscard]] OrderId Rest(Side p_side, Price p_price, Quantity p_quantity)
     pre (p_quantity > Quantity{});
+
+  // Rest for a caller that has a free slot and the FindLevel position of p_price.
+  [[nodiscard]] OrderId RestAtLevel(Side p_side, Price p_price, Quantity p_quantity, std::uint32_t p_index)
+    pre (p_quantity > Quantity{})
+    pre (free_count_ > 0);
 
   [[nodiscard]] PriceLadder &Levels(Side p_side);
   [[nodiscard]] const PriceLadder &Levels(Side p_side) const;
