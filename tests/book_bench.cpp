@@ -166,6 +166,45 @@ template <typename Timing> [[nodiscard]] Result BenchCancel()
   return Result{kOrders, elapsed, std::move(samples)};
 }
 
+template <typename Timing> [[nodiscard]] Result BenchReplace()
+{
+  constexpr std::uint32_t kLevels = 64;
+  constexpr std::uint32_t kOps = 1000000;
+  mex::Book book(kLevels + 1, kLevels + 1);
+  for (std::uint32_t i = 0; i < kLevels; ++i)
+  {
+    const mex::SubmitResult result =
+        book.SubmitLimitOrder(mex::Side::Buy, mex::Price{i}, mex::Quantity{1});
+    if (result.status_ != mex::SubmitStatus::Accepted)
+    {
+      std::cerr << "replace seed rejected\n";
+      std::exit(1);
+    }
+  }
+  mex::OrderId order_id =
+      book.SubmitLimitOrder(mex::Side::Buy, mex::Price{0}, mex::Quantity{1}).order_id_;
+  std::vector<std::uint64_t> samples = Timing::MakeSamples(kOps);
+  const Clock::duration elapsed = Time(
+      [&]()
+      {
+        for (std::uint32_t i = 0; i < kOps; ++i)
+        {
+          // The extra price also exercises removal and insertion of a level.
+          const mex::Price price{i % (kLevels + 1)};
+          const mex::SubmitResult result = Timing::Op(
+              samples, i, [&]() { return book.ReplaceOrder(order_id, price, mex::Quantity{1}); });
+          if (result.status_ != mex::SubmitStatus::Accepted ||
+              result.remaining_ != mex::Quantity{1} || result.order_id_ == mex::kInvalidOrderId)
+          {
+            std::cerr << "replace failed\n";
+            std::exit(1);
+          }
+          order_id = result.order_id_;
+        }
+      });
+  return Result{kOps, elapsed, std::move(samples)};
+}
+
 template <typename Timing> [[nodiscard]] Result BenchTakeBest()
 {
   constexpr std::uint32_t kOrders = 100000;
@@ -288,6 +327,7 @@ int main()
       BenchAppendToOneLevel<PerOpTiming>);
   Run("rest across 64 levels", BenchRestAcrossLevels<NoTiming>, BenchRestAcrossLevels<PerOpTiming>);
   Run("cancel random live orders", BenchCancel<NoTiming>, BenchCancel<PerOpTiming>);
+  Run("replace across 64 levels", BenchReplace<NoTiming>, BenchReplace<PerOpTiming>);
   Run("take one lot from the touch", BenchTakeBest<NoTiming>, BenchTakeBest<PerOpTiming>);
   Run("mixed insert and cancel", BenchMixedBook<NoTiming>, BenchMixedBook<PerOpTiming>);
   std::cout << "Target from the design spec: 100000 to 500000 orders/s\n";
