@@ -1,7 +1,9 @@
 # Project C++ constraints
 
-Use the shared `cpp-*` skills in `~/ai/skills` for C++ rules. They include
-principles from TigerStyle. The reference copy is [TigerStyle](../prep/TIGER_STYLE.md).
+Use the [C++ topic skills](../.agents/skills/cpp-principles/SKILL.md) for C++
+rules, including naming and layout. They come from [ai-assets](https://github.com/breakbadsp/ai-assets)
+at commit `0a8f65d7f007df38598d8a9f6daa72f5c9ab01f8` and include TigerStyle
+principles. The reference copy is [TigerStyle](../prep/TIGER_STYLE.md).
 
 - Keep `.hpp` and `.cpp` file extensions. Use `.clang-format` for layout.
   Run `cmake --build build --target clang-format-check` to check it.
