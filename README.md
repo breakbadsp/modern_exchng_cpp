@@ -9,7 +9,7 @@ Single-symbol limit order book with price-time (FIFO) matching. One `mex::Book` 
 - **Single-threaded**, no heap allocation on the hot path after setup
 - Prices are **integer ticks** (`mex::Price`); order sizes are `mex::Quantity` (`uint32_t` units). Level totals stay `uint64_t`.
 
-Design background and locked decisions: [`prep/design-spec.md`](prep/design-spec.md). Gateway, queues, and engine threads: [`prep/io-design-spec.md`](prep/io-design-spec.md). C++ style: [`docs/naming-conventions.md`](docs/naming-conventions.md) (2-space indent, Allman braces; enforced by [`.clang-format`](.clang-format)).
+Design background and locked decisions: [`prep/design-spec.md`](prep/design-spec.md). Gateway, queues, and engine threads: [`prep/io-design-spec.md`](prep/io-design-spec.md). C++ style: [`docs/cpp-coding-standards.md`](docs/cpp-coding-standards.md) (2-space indent, Allman braces; enforced by [`.clang-format`](.clang-format)).
 
 ## Requirements
 
