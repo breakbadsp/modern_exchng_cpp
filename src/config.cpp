@@ -107,10 +107,10 @@ template <typename T>
 
 [[nodiscard]] Status ParseEngine(ParseState &p_state, Fields p_fields)
 {
-  auto core = ParseInteger<std::uint32_t>("core", p_fields[1]);
+  const auto core = ParseInteger<std::uint32_t>("core", p_fields[1]);
   if (!core)
   {
-    return std::unexpected(std::move(core.error()));
+    return std::unexpected(core.error());
   }
   p_state.config_.engines_.push_back(EngineConfig{.core_ = *core});
   p_state.engine_lines_.push_back(p_state.line_);
@@ -119,35 +119,35 @@ template <typename T>
 
 [[nodiscard]] Status ParseSymbol(ParseState &p_state, Fields p_fields)
 {
-  auto symbol_id = ParseInteger<wire::SymbolId>("symbol_id", p_fields[1]);
+  const auto symbol_id = ParseInteger<wire::SymbolId>("symbol_id", p_fields[1]);
   if (!symbol_id)
   {
-    return std::unexpected(std::move(symbol_id.error()));
+    return std::unexpected(symbol_id.error());
   }
-  auto engine = ParseInteger<std::uint32_t>("engine", p_fields[2]);
+  const auto engine = ParseInteger<std::uint32_t>("engine", p_fields[2]);
   if (!engine)
   {
-    return std::unexpected(std::move(engine.error()));
+    return std::unexpected(engine.error());
   }
-  auto max_orders = ParseInteger<std::uint32_t>("max_orders", p_fields[3], 1);
+  const auto max_orders = ParseInteger<std::uint32_t>("max_orders", p_fields[3], 1);
   if (!max_orders)
   {
-    return std::unexpected(std::move(max_orders.error()));
+    return std::unexpected(max_orders.error());
   }
-  auto max_price_levels = ParseInteger<std::uint32_t>("max_price_levels", p_fields[4]);
+  const auto max_price_levels = ParseInteger<std::uint32_t>("max_price_levels", p_fields[4]);
   if (!max_price_levels)
   {
-    return std::unexpected(std::move(max_price_levels.error()));
+    return std::unexpected(max_price_levels.error());
   }
-  auto min_price = ParseInteger<std::int64_t>("min_price", p_fields[5]);
+  const auto min_price = ParseInteger<std::int64_t>("min_price", p_fields[5]);
   if (!min_price)
   {
-    return std::unexpected(std::move(min_price.error()));
+    return std::unexpected(min_price.error());
   }
-  auto max_price = ParseInteger<std::int64_t>("max_price", p_fields[6]);
+  const auto max_price = ParseInteger<std::int64_t>("max_price", p_fields[6]);
   if (!max_price)
   {
-    return std::unexpected(std::move(max_price.error()));
+    return std::unexpected(max_price.error());
   }
 
   Config &config = p_state.config_;
@@ -216,10 +216,10 @@ template <typename T>
 [[nodiscard]] Status SetCapacity(std::optional<std::uint32_t> &p_slot, std::string_view p_key,
                                  std::string_view p_value)
 {
-  auto capacity = ParseInteger<std::uint32_t>(p_key, p_value, 1);
+  const auto capacity = ParseInteger<std::uint32_t>(p_key, p_value, 1);
   if (!capacity)
   {
-    return std::unexpected(std::move(capacity.error()));
+    return std::unexpected(capacity.error());
   }
   if (!std::has_single_bit(*capacity))
   {
@@ -245,19 +245,19 @@ template <typename T>
   }
   if (key == "port")
   {
-    auto port = ParseInteger<std::uint16_t>(key, value, 1);
+    const auto port = ParseInteger<std::uint16_t>(key, value, 1);
     if (!port)
     {
-      return std::unexpected(std::move(port.error()));
+      return std::unexpected(port.error());
     }
     return SetOnce(gateway.port_, key, *port);
   }
   if (key == "max_connections")
   {
-    auto max_connections = ParseInteger<std::uint32_t>(key, value, 1);
+    const auto max_connections = ParseInteger<std::uint32_t>(key, value, 1);
     if (!max_connections)
     {
-      return std::unexpected(std::move(max_connections.error()));
+      return std::unexpected(max_connections.error());
     }
     return SetOnce(gateway.max_connections_, key, *max_connections);
   }
@@ -330,7 +330,7 @@ constexpr std::array kRecordKinds{
     }
   }
 
-  GatewayKeys &keys = p_state.gateway_;
+  const GatewayKeys &keys = p_state.gateway_;
   const auto missing = [](std::string_view p_key)
   {
     return std::unexpected(
@@ -356,7 +356,7 @@ constexpr std::array kRecordKinds{
   {
     return missing("outbound_queue_capacity");
   }
-  config.gateway_ = GatewayConfig{.listen_address_ = std::move(*keys.listen_address_),
+  config.gateway_ = GatewayConfig{.listen_address_ = *keys.listen_address_,
                                   .port_ = *keys.port_,
                                   .max_connections_ = *keys.max_connections_,
                                   .inbound_queue_capacity_ = *keys.inbound_queue_capacity_,

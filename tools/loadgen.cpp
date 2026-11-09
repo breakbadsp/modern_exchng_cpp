@@ -130,10 +130,11 @@ ParseSymbols(std::string_view p_text)
   while (begin <= p_text.size())
   {
     const std::size_t comma = std::min(p_text.find(',', begin), p_text.size());
-    auto symbol = ParseNumber<wire::SymbolId>("--symbols", p_text.substr(begin, comma - begin));
+    const auto symbol =
+        ParseNumber<wire::SymbolId>("--symbols", p_text.substr(begin, comma - begin));
     if (!symbol.has_value())
     {
-      return std::unexpected(std::move(symbol.error()));
+      return std::unexpected(symbol.error());
     }
     symbols.push_back(*symbol);
     begin = comma + 1;
@@ -149,7 +150,7 @@ ApplyOption(Options &p_options, std::string_view p_name, std::string_view p_valu
   {
     if (!p_parsed.has_value())
     {
-      return std::unexpected(std::move(p_parsed.error()));
+      return std::unexpected(p_parsed.error());
     }
     p_field = std::move(*p_parsed);
     return {};
@@ -203,10 +204,10 @@ ApplyOption(Options &p_options, std::string_view p_name, std::string_view p_valu
     {
       return std::unexpected(std::format("{} needs a value", p_args[index]));
     }
-    auto applied = ApplyOption(options, p_args[index], p_args[index + 1]);
+    const auto applied = ApplyOption(options, p_args[index], p_args[index + 1]);
     if (!applied.has_value())
     {
-      return std::unexpected(std::move(applied.error()));
+      return std::unexpected(applied.error());
     }
   }
   if (options.orders_ == 0 || options.window_ == 0)
@@ -320,7 +321,7 @@ public:
   {
     if (buffer_.size() - size_ < wire::kFrameSize<M>)
     {
-      auto flushed = Flush();
+      const auto flushed = Flush();
       if (!flushed.has_value())
       {
         return flushed;
@@ -405,10 +406,10 @@ void ReadReports(FrameReader &p_reader, Shared &p_shared, std::uint64_t p_expect
   std::uint64_t finals = 0;
   while (finals < p_expected)
   {
-    auto frame = p_reader.Next();
+    const auto frame = p_reader.Next();
     if (!frame.has_value())
     {
-      p_result.error_ = std::move(frame.error());
+      p_result.error_ = frame.error();
       break;
     }
     const std::int64_t now_ns = NowNs();
@@ -562,7 +563,7 @@ private:
   const auto fail = [&result](std::string p_error)
   {
     result.error_ = std::move(p_error);
-    return std::move(result);
+    return result;
   };
   for (std::uint64_t sent = 0; sent < p_options.orders_; ++sent)
   {
@@ -575,9 +576,9 @@ private:
       const auto due = p_start + std::chrono::nanoseconds{sent * 1'000'000'000 / p_options.rate_};
       if (Clock::now() < due)
       {
-        if (auto flushed = writer.Flush(); !flushed.has_value())
+        if (const auto flushed = writer.Flush(); !flushed.has_value())
         {
-          return fail(std::move(flushed.error()));
+          return fail(flushed.error());
         }
         std::this_thread::sleep_until(due);
       }
@@ -585,9 +586,9 @@ private:
     if (sent - p_shared.finals_.load(std::memory_order_acquire) >= p_options.window_)
     {
       // The reports we wait for need the buffered frames sent first.
-      if (auto flushed = writer.Flush(); !flushed.has_value())
+      if (const auto flushed = writer.Flush(); !flushed.has_value())
       {
-        return fail(std::move(flushed.error()));
+        return fail(flushed.error());
       }
       while (sent - p_shared.finals_.load(std::memory_order_acquire) >= p_options.window_)
       {
@@ -598,14 +599,14 @@ private:
         std::this_thread::yield();
       }
     }
-    if (auto appended = flow.Next(writer, p_shared, result); !appended.has_value())
+    if (const auto appended = flow.Next(writer, p_shared, result); !appended.has_value())
     {
-      return fail(std::move(appended.error()));
+      return fail(appended.error());
     }
   }
-  if (auto flushed = writer.Flush(); !flushed.has_value())
+  if (const auto flushed = writer.Flush(); !flushed.has_value())
   {
-    return fail(std::move(flushed.error()));
+    return fail(flushed.error());
   }
   return result;
 }
@@ -614,17 +615,17 @@ private:
                                                      FrameReader &p_reader)
 {
   FrameWriter writer{p_fd};
-  auto appended =
+  const auto appended =
       writer.Append(wire::Logon{.session_name_ = p_options.session_, .token_ = p_options.token_});
-  auto flushed = appended.has_value() ? writer.Flush() : std::move(appended);
+  const auto flushed = appended.has_value() ? writer.Flush() : appended;
   if (!flushed.has_value())
   {
     return flushed;
   }
-  auto frame = p_reader.Next();
+  const auto frame = p_reader.Next();
   if (!frame.has_value())
   {
-    return std::unexpected(std::move(frame.error()));
+    return std::unexpected(frame.error());
   }
   if (const auto *reject = std::get_if<wire::LogonReject>(&frame->message_); reject != nullptr)
   {
