@@ -385,6 +385,11 @@ std::span<const Fill> Book::Fills() const
 
 std::uint32_t Book::FreeSlotCount() const { return free_count_; }
 
+std::span<const OrderId> Book::FreeSlots() const
+{
+  return std::span<const OrderId>(free_ids_.get(), free_count_);
+}
+
 std::uint32_t Book::MaxOrders() const { return pool_size_; }
 
 Quantity Book::Match(Side p_aggressor, const Price *p_limit_price, Quantity p_quantity)

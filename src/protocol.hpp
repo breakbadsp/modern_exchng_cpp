@@ -18,6 +18,7 @@
 // Frame: header {u16 length; u8 type;}, then for exchange -> client frames a
 // u64 seq, then the body fields in declaration order with no padding.
 // length is the full frame size, header included. All integers are little-endian.
+// NewOrder, Cancel, and Replace start with the session's request number.
 namespace mex::wire
 {
 
@@ -27,6 +28,19 @@ static_assert(std::endian::native == std::endian::little);
 using SymbolId = std::uint32_t;
 using ClientOrderId = std::uint64_t;
 using ExchangeOrderId = std::uint64_t;
+
+// Identifies one NewOrder, Cancel, or Replace of a session, so that an engine
+// executes it at most once. The client starts at 1 and increases the number
+// for each new request, also across reconnects. A retry repeats the request
+// unchanged, with its number. Distinct from ClientOrderId, which names an order.
+struct RequestNumber
+{
+  std::uint64_t value_ = 0;
+
+  constexpr auto operator<=>(const RequestNumber &) const = default;
+};
+
+static_assert(sizeof(RequestNumber) == 8);
 
 constexpr std::size_t kNameSize = 16;
 
@@ -60,6 +74,7 @@ enum class Reason : std::uint8_t
   TooLate,
   CannotRest,
   MarketRemainder,
+  DuplicateRequest,
 };
 
 enum class MsgType : std::uint8_t
@@ -97,7 +112,7 @@ enum class MsgType : std::uint8_t
 
 [[nodiscard]] constexpr bool IsValid(Reason p_value)
 {
-  return std::to_underlying(p_value) <= std::to_underlying(Reason::MarketRemainder);
+  return std::to_underlying(p_value) <= std::to_underlying(Reason::DuplicateRequest);
 }
 
 // Each message lists its wire fields once, in Fields(). Encode, decode, and the
@@ -121,6 +136,7 @@ struct Logon
 struct NewOrder
 {
   static constexpr MsgType kType = MsgType::NewOrder;
+  RequestNumber request_number_{};
   ClientOrderId client_order_id_ = 0;
   SymbolId symbol_id_ = 0;
   Side side_ = Side::Buy;
@@ -130,8 +146,8 @@ struct NewOrder
 
   constexpr void Fields(this auto &p_self, auto &&p_visit)
   {
-    p_visit(p_self.client_order_id_, p_self.symbol_id_, p_self.side_, p_self.type_, p_self.price_,
-            p_self.qty_);
+    p_visit(p_self.request_number_, p_self.client_order_id_, p_self.symbol_id_, p_self.side_,
+            p_self.type_, p_self.price_, p_self.qty_);
   }
   bool operator==(const NewOrder &) const = default;
 };
@@ -139,12 +155,13 @@ struct NewOrder
 struct Cancel
 {
   static constexpr MsgType kType = MsgType::Cancel;
+  RequestNumber request_number_{};
   ClientOrderId client_order_id_ = 0;
   SymbolId symbol_id_ = 0;
 
   constexpr void Fields(this auto &p_self, auto &&p_visit)
   {
-    p_visit(p_self.client_order_id_, p_self.symbol_id_);
+    p_visit(p_self.request_number_, p_self.client_order_id_, p_self.symbol_id_);
   }
   bool operator==(const Cancel &) const = default;
 };
@@ -152,6 +169,7 @@ struct Cancel
 struct Replace
 {
   static constexpr MsgType kType = MsgType::Replace;
+  RequestNumber request_number_{};
   ClientOrderId client_order_id_ = 0;
   SymbolId symbol_id_ = 0;
   Price new_price_{};
@@ -159,7 +177,8 @@ struct Replace
 
   constexpr void Fields(this auto &p_self, auto &&p_visit)
   {
-    p_visit(p_self.client_order_id_, p_self.symbol_id_, p_self.new_price_, p_self.new_total_qty_);
+    p_visit(p_self.request_number_, p_self.client_order_id_, p_self.symbol_id_, p_self.new_price_,
+            p_self.new_total_qty_);
   }
   bool operator==(const Replace &) const = default;
 };
@@ -302,6 +321,28 @@ struct Done
   }
   bool operator==(const Done &) const = default;
 };
+
+// The reject that answers each client order message.
+[[nodiscard]] constexpr Reject RejectOf(const NewOrder &p_order, Reason p_reason)
+{
+  return {.client_order_id_ = p_order.client_order_id_,
+          .symbol_id_ = p_order.symbol_id_,
+          .reason_ = p_reason};
+}
+
+[[nodiscard]] constexpr CancelReject RejectOf(const Cancel &p_cancel, Reason p_reason)
+{
+  return {.client_order_id_ = p_cancel.client_order_id_,
+          .symbol_id_ = p_cancel.symbol_id_,
+          .reason_ = p_reason};
+}
+
+[[nodiscard]] constexpr ReplaceReject RejectOf(const Replace &p_replace, Reason p_reason)
+{
+  return {.client_order_id_ = p_replace.client_order_id_,
+          .symbol_id_ = p_replace.symbol_id_,
+          .reason_ = p_reason};
+}
 
 using ClientMessage = std::variant<Logon, NewOrder, Cancel, Replace>;
 using ExchangeMessage = std::variant<LogonAck, LogonReject, Ack, Reject, Fill, CancelAck,

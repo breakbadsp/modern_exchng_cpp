@@ -105,6 +105,8 @@ public:
   [[nodiscard]] std::span<const Fill> Fills() const;
 
   [[nodiscard]] std::uint32_t FreeSlotCount() const;
+  // The free slots as a stack: the next resting order takes the last one.
+  [[nodiscard]] std::span<const OrderId> FreeSlots() const;
   [[nodiscard]] std::uint32_t MaxOrders() const;
 
 private:
