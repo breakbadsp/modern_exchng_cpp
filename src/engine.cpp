@@ -10,6 +10,28 @@
 
 namespace mex
 {
+namespace
+{
+
+constexpr std::uint64_t kGoldenRatio = 0x9E3779B97F4A7C15ULL;
+
+// splitmix64 finalizer.
+[[nodiscard]] constexpr std::uint64_t Finalize(std::uint64_t p_value)
+{
+  std::uint64_t hash = p_value;
+  hash = (hash ^ (hash >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+  hash = (hash ^ (hash >> 27U)) * 0x94D049BB133111EBULL;
+  return hash ^ (hash >> 31U);
+}
+
+// Adds one value to a state digest. The result depends on the order of the
+// values. The constant keeps a run of zero values from leaving the digest at 0.
+constexpr void Mix(std::uint64_t &p_digest, std::uint64_t p_value)
+{
+  p_digest = Finalize(p_digest + kGoldenRatio + p_value);
+}
+
+} // namespace
 
 ClientOrderIndex::ClientOrderIndex(std::uint32_t p_max_orders)
     : mask_(std::bit_ceil(std::size_t{2} * p_max_orders) - 1),
@@ -20,11 +42,7 @@ ClientOrderIndex::ClientOrderIndex(std::uint32_t p_max_orders)
 std::size_t ClientOrderIndex::HomeSlot(SessionId p_owner,
                                        wire::ClientOrderId p_client_order_id) const
 {
-  // splitmix64 finalizer over the id mixed with the owner.
-  std::uint64_t hash = p_client_order_id ^ (std::uint64_t{p_owner} * 0x9E3779B97F4A7C15ULL);
-  hash = (hash ^ (hash >> 30U)) * 0xBF58476D1CE4E5B9ULL;
-  hash = (hash ^ (hash >> 27U)) * 0x94D049BB133111EBULL;
-  hash ^= hash >> 31U;
+  const std::uint64_t hash = Finalize(p_client_order_id ^ (std::uint64_t{p_owner} * kGoldenRatio));
   return static_cast<std::size_t>(hash) & mask_;
 }
 
@@ -106,15 +124,60 @@ struct Engine::Instrument
   {
   }
 
+  // Adds the resting orders of one side: its levels in ladder order, and the
+  // orders of each level in time priority.
+  void MixSide(std::uint64_t &p_digest, const PriceLadder &p_levels) const
+  {
+    Mix(p_digest, p_levels.size());
+    for (const PriceLevel &level : p_levels)
+    {
+      // Two's complement, so each price has one value.
+      Mix(p_digest, static_cast<std::uint64_t>(level.price_.ticks_));
+      Mix(p_digest, level.order_count_);
+      OrderId order_id = level.head_;
+      for (std::uint32_t count = 0; count < level.order_count_; ++count)
+      {
+        const OrderMeta &meta = meta_[order_id];
+        Mix(p_digest, order_id);
+        Mix(p_digest, book_.Order(order_id).quantity_.units_);
+        Mix(p_digest, meta.owner_);
+        Mix(p_digest, meta.client_order_id_);
+        Mix(p_digest, meta.cum_qty_.units_);
+        // The index entry of this order, read by key and not by position.
+        Mix(p_digest, index_.Find(meta.owner_, meta.client_order_id_).value_or(kInvalidOrderId));
+        order_id = book_.Order(order_id).next_;
+      }
+    }
+  }
+
+  void MixState(std::uint64_t &p_digest) const
+  {
+    Mix(p_digest, symbol_id_);
+    MixSide(p_digest, book_.Bids());
+    MixSide(p_digest, book_.Asks());
+    // With the lookups above, the size shows that the index has no other entry.
+    Mix(p_digest, index_.Size());
+    // The next exchange_order_id of each slot, and the slot that each later
+    // order takes, also depend on the free slots.
+    for (OrderId slot = 0; slot < book_.MaxOrders(); ++slot)
+    {
+      Mix(p_digest, meta_[slot].generation_);
+    }
+    for (const OrderId slot : book_.FreeSlots())
+    {
+      Mix(p_digest, slot);
+    }
+  }
+
   Book book_;
   std::unique_ptr<OrderMeta[]> meta_;
   ClientOrderIndex index_;
   wire::SymbolId symbol_id_;
 };
 
-Engine::Engine(std::span<const BookConfig> p_books, SpscQueue<Command> &p_inbound,
-               SpscQueue<Report> &p_outbound)
-    : inbound_(p_inbound), outbound_(p_outbound)
+Engine::Engine(std::span<const BookConfig> p_books, std::size_t p_session_count,
+               SpscQueue<Command> &p_inbound, SpscQueue<Report> &p_outbound)
+    : client_table_(p_session_count), inbound_(p_inbound), outbound_(p_outbound)
 {
   instruments_.reserve(p_books.size());
   for (const BookConfig &config : p_books)
@@ -132,23 +195,47 @@ bool Engine::ProcessOne()
   {
     return false;
   }
-  contract_assert(command->symbol_slot_ < instruments_.size());
-  Instrument &inst = *instruments_[command->symbol_slot_];
-  if (const auto *order = std::get_if<wire::NewOrder>(&command->order_))
-  {
-    OnNewOrder(command->session_id_, inst, *order);
-  }
-  else if (const auto *cancel = std::get_if<wire::Cancel>(&command->order_))
-  {
-    OnCancel(command->session_id_, inst, *cancel);
-  }
-  else
-  {
-    const auto *replace = std::get_if<wire::Replace>(&command->order_);
-    contract_assert(replace != nullptr);
-    OnReplace(command->session_id_, inst, *replace);
-  }
+  Apply(*command);
   return true;
+}
+
+void Engine::Apply(const Command &p_command)
+{
+  contract_assert(p_command.symbol_slot_ < instruments_.size());
+  contract_assert(p_command.session_id_ < client_table_.size());
+  last_applied_op_ = p_command.op_number_;
+  Instrument &inst = *instruments_[p_command.symbol_slot_];
+  wire::RequestNumber &last_request = client_table_[p_command.session_id_];
+  std::visit(
+      [&](const auto &p_order)
+      {
+        contract_assert(p_order.symbol_id_ == inst.symbol_id_);
+        if (p_order.request_number_ <= last_request)
+        {
+          Emit(p_command.session_id_, wire::RejectOf(p_order, wire::Reason::DuplicateRequest));
+          return;
+        }
+        last_request = p_order.request_number_;
+        Execute(p_command.session_id_, inst, p_order);
+      },
+      p_command.order_);
+}
+
+OpNumber Engine::LastAppliedOp() const { return last_applied_op_; }
+
+std::uint64_t Engine::StateDigest() const
+{
+  std::uint64_t digest = 0;
+  Mix(digest, last_applied_op_.value_);
+  for (const wire::RequestNumber last_request : client_table_)
+  {
+    Mix(digest, last_request.value_);
+  }
+  for (const std::unique_ptr<Instrument> &inst : instruments_)
+  {
+    inst->MixState(digest);
+  }
+  return digest;
 }
 
 void Engine::Run()
@@ -166,9 +253,8 @@ std::uint64_t Engine::OutboundStalls() const
   return outbound_stalls_.load(std::memory_order_relaxed);
 }
 
-void Engine::OnNewOrder(SessionId p_session, Instrument &p_inst, const wire::NewOrder &p_order)
+void Engine::Execute(SessionId p_session, Instrument &p_inst, const wire::NewOrder &p_order)
 {
-  contract_assert(p_order.symbol_id_ == p_inst.symbol_id_);
   const auto reject = [&](wire::Reason p_reason)
   {
     Emit(p_session, wire::Reject{.client_order_id_ = p_order.client_order_id_,
@@ -227,9 +313,8 @@ void Engine::OnNewOrder(SessionId p_session, Instrument &p_inst, const wire::New
                             .leaves_ = leaves});
 }
 
-void Engine::OnCancel(SessionId p_session, Instrument &p_inst, const wire::Cancel &p_cancel)
+void Engine::Execute(SessionId p_session, Instrument &p_inst, const wire::Cancel &p_cancel)
 {
-  contract_assert(p_cancel.symbol_id_ == p_inst.symbol_id_);
   const std::optional<OrderId> order_id = p_inst.index_.Find(p_session, p_cancel.client_order_id_);
   if (!order_id.has_value())
   {
@@ -245,9 +330,8 @@ void Engine::OnCancel(SessionId p_session, Instrument &p_inst, const wire::Cance
                                   .symbol_id_ = p_inst.symbol_id_});
 }
 
-void Engine::OnReplace(SessionId p_session, Instrument &p_inst, const wire::Replace &p_replace)
+void Engine::Execute(SessionId p_session, Instrument &p_inst, const wire::Replace &p_replace)
 {
-  contract_assert(p_replace.symbol_id_ == p_inst.symbol_id_);
   const auto reject = [&](wire::Reason p_reason)
   {
     Emit(p_session, wire::ReplaceReject{.client_order_id_ = p_replace.client_order_id_,

@@ -37,7 +37,8 @@ Name NameOf(std::string_view p_text)
 
 TEST(ProtocolTest, NewOrderHasTheDocumentedByteLayout)
 {
-  const NewOrder order{.client_order_id_ = 0x0102030405060708,
+  const NewOrder order{.request_number_ = RequestNumber{0x2122232425262728},
+                       .client_order_id_ = 0x0102030405060708,
                        .symbol_id_ = 0x0A0B0C0D,
                        .side_ = Side::Sell,
                        .type_ = OrderType::Limit,
@@ -48,7 +49,8 @@ TEST(ProtocolTest, NewOrderHasTheDocumentedByteLayout)
   const std::size_t size = Encode(order, buffer);
 
   const std::vector<std::byte> expected =
-      Bytes({0x1D, 0x00, 0x02,                               // length 29, type NewOrder
+      Bytes({0x25, 0x00, 0x02,                               // length 37, type NewOrder
+             0x28, 0x27, 0x26, 0x25, 0x24, 0x23, 0x22, 0x21, // request_number
              0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // client_order_id
              0x0D, 0x0C, 0x0B, 0x0A,                         // symbol_id
              0x01,                                           // side Sell
@@ -75,14 +77,16 @@ TEST(ProtocolTest, EveryClientMessageRoundTrips)
 {
   const std::vector<ClientMessage> messages = {
       Logon{.session_name_ = NameOf("alice"), .token_ = NameOf("0123456789abcdef")},
-      NewOrder{.client_order_id_ = 7,
+      NewOrder{.request_number_ = RequestNumber{21},
+               .client_order_id_ = 7,
                .symbol_id_ = 3,
                .side_ = Side::Buy,
                .type_ = OrderType::Market,
                .price_ = Price{0},
                .qty_ = Quantity{100}},
-      Cancel{.client_order_id_ = 8, .symbol_id_ = 4},
-      Replace{.client_order_id_ = 9,
+      Cancel{.request_number_ = RequestNumber{22}, .client_order_id_ = 8, .symbol_id_ = 4},
+      Replace{.request_number_ = RequestNumber{23},
+              .client_order_id_ = 9,
               .symbol_id_ = 5,
               .new_price_ = Price{12345},
               .new_total_qty_ = Quantity{50}},
@@ -180,8 +184,8 @@ TEST(ProtocolTest, DecodesBackToBackFramesOneAtATime)
 TEST(ProtocolTest, WrongLengthIsMalformedFromTheHeaderAlone)
 {
   Buffer buffer{};
-  ASSERT_EQ(Encode(Cancel{}, buffer), 15U);
-  buffer[0] = std::byte{0x0E}; // Cancel is 15 bytes, not 14
+  ASSERT_EQ(Encode(Cancel{}, buffer), 23U);
+  buffer[0] = std::byte{0x16}; // Cancel is 23 bytes, not 22
 
   EXPECT_EQ(DecodeClientFrame(std::span{buffer}.first(kHeaderSize)).status_,
             DecodeStatus::Malformed);
@@ -206,7 +210,7 @@ TEST(ProtocolTest, OutOfRangeEnumFieldIsMalformed)
 {
   Buffer buffer{};
   const std::size_t size = Encode(NewOrder{.qty_ = Quantity{1}}, buffer);
-  constexpr std::size_t kSideOffset = kHeaderSize + 8 + 4;
+  constexpr std::size_t kSideOffset = kHeaderSize + 8 + 8 + 4;
   constexpr std::size_t kTypeOffset = kSideOffset + 1;
 
   Buffer bad_side = buffer;

@@ -50,13 +50,13 @@ Configure fails if CMake is not using Ninja (`-G Ninja` or the preset above), if
 ./build/mex_exchange config/example.cfg
 ```
 
-`mex_loadgen` logs on as one session, sends a mix of NewOrder, Cancel, and Replace, and prints throughput and NewOrder -> first report latency. It exits non-zero if logon fails, a seq gap is seen, or the connection fails. `--help` lists the options.
+`mex_loadgen` logs on as one session, sends a mix of NewOrder, Cancel, and Replace, and prints throughput and NewOrder -> first report latency. It exits non-zero if logon fails, a seq gap is seen, the connection fails, or a request is rejected as `DuplicateRequest`. `--help` lists the options.
 
 ```bash
 ./build/mex_loadgen --port 9000 --session alice --token alice-secret --symbols 1,2,3 --orders 1000000
 ```
 
-The session owns its resting orders, so a second run on the same session and exchange can get `DuplicateClientOrderId` rejects. Restart the exchange or use another session for clean numbers.
+The session owns its resting orders and its request numbers. Each run starts at request number 1, so a second run on the same session and exchange fails with a `DuplicateRequest` reject. Restart the exchange or use another session.
 
 ## Formatting
 

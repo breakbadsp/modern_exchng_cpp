@@ -20,7 +20,8 @@
 
 // Gateway thread (prep/io-design-spec.md, step 6). It owns every socket: it
 // accepts clients, checks logon, reassembles and validates frames, routes each
-// order to its engine, and writes the engines' reports back to the sessions.
+// order to its engine with the next op number, and writes the engines' reports
+// back to the sessions.
 // It never blocks: a full inbound queue is a SystemBusy reject, and a client
 // whose send buffer is full is disconnected.
 namespace mex
@@ -131,6 +132,9 @@ private:
   std::vector<SessionConfig> session_configs_{};
   std::vector<Session> sessions_{};
   std::vector<EngineQueues> queues_{};
+  // The last op number given to a command, over all engines. This counter
+  // stands in for the replicated log, which will assign the numbers later.
+  OpNumber last_op_{};
   std::unique_ptr<Connection[]> connections_;
   std::vector<std::uint32_t> free_connections_{};
   std::vector<std::uint32_t> pending_flush_{}; // connections with unsent bytes to try

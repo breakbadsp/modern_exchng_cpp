@@ -33,8 +33,9 @@
 // Load generator for the exchange (prep/io-design-spec.md, step 7). One session
 // sends a mix of NewOrder, Cancel, and Replace while a reader thread decodes
 // the reports. At the end it prints throughput and NewOrder -> first report
-// latency. It is a test tool: it blocks on its socket and is not on the
-// exchange hot path.
+// latency. Request numbers start at 1 on each run and it never retries, so a
+// DuplicateRequest reject means that the session was used before; the run fails.
+// It is a test tool: it blocks on its socket and is not on the exchange hot path.
 namespace
 {
 
@@ -425,9 +426,14 @@ void ReadReports(FrameReader &p_reader, Shared &p_shared, std::uint64_t p_expect
     {
       ++p_result.system_busy_;
     }
+    bool duplicate_request = false;
     std::visit(
         [&](const auto &p_message)
         {
+          if constexpr (requires { p_message.reason_; })
+          {
+            duplicate_request = p_message.reason_ == wire::Reason::DuplicateRequest;
+          }
           if constexpr (requires { p_message.client_order_id_; })
           {
             const wire::ClientOrderId id = p_message.client_order_id_;
@@ -443,6 +449,12 @@ void ReadReports(FrameReader &p_reader, Shared &p_shared, std::uint64_t p_expect
           }
         },
         frame->message_);
+    if (duplicate_request)
+    {
+      p_result.error_ = "DuplicateRequest reject: this session already sent requests to the "
+                        "exchange; restart the exchange or use another session";
+      break;
+    }
     if (IsFinal(frame->message_))
     {
       ++finals;
@@ -495,7 +507,8 @@ public:
       live_begin_ = (live_begin_ + 1) % kMaxLiveOrders;
       --live_count_;
       ++p_result.cancels_;
-      return p_writer.Append(wire::Cancel{.client_order_id_ = oldest.client_order_id_,
+      return p_writer.Append(wire::Cancel{.request_number_ = NextRequestNumber(),
+                                          .client_order_id_ = oldest.client_order_id_,
                                           .symbol_id_ = oldest.symbol_id_});
     }
     ++p_result.new_orders_;
@@ -510,6 +523,13 @@ public:
   }
 
 private:
+  // One sequence for all symbols, so each engine sees increasing numbers with gaps.
+  [[nodiscard]] wire::RequestNumber NextRequestNumber()
+  {
+    ++last_request_number_.value_;
+    return last_request_number_;
+  }
+
   [[nodiscard]] Price Clamp(std::int64_t p_ticks) const
   {
     return Price{
@@ -520,7 +540,8 @@ private:
   {
     const Side side = coin_(rng_) == 0 ? Side::Buy : Side::Sell;
     const std::int64_t away = depth_(rng_); // negative crosses mid
-    return {.client_order_id_ = ++last_client_order_id_,
+    return {.request_number_ = NextRequestNumber(),
+            .client_order_id_ = ++last_client_order_id_,
             .symbol_id_ = options_.symbols_[symbol_(rng_)],
             .side_ = side,
             .type_ = wire::OrderType::Limit,
@@ -533,7 +554,8 @@ private:
     std::uniform_int_distribution<std::size_t> pick{0, live_count_ - 1};
     LiveOrder &order = live_[(live_begin_ + pick(rng_)) % kMaxLiveOrders];
     order.price_ = Clamp(order.price_.ticks_ + step_(rng_));
-    return {.client_order_id_ = order.client_order_id_,
+    return {.request_number_ = NextRequestNumber(),
+            .client_order_id_ = order.client_order_id_,
             .symbol_id_ = order.symbol_id_,
             .new_price_ = order.price_,
             .new_total_qty_ = Quantity{qty_(rng_)}};
@@ -551,6 +573,7 @@ private:
   std::size_t live_begin_ = 0;
   std::size_t live_count_ = 0;
   wire::ClientOrderId last_client_order_id_ = 0;
+  wire::RequestNumber last_request_number_{};
 };
 
 // Sends p_options.orders_ operations, paced by --rate and limited by --window.

@@ -80,28 +80,6 @@ constexpr std::uint64_t kFirstSeq = 1;
   return std::nullopt;
 }
 
-// The reject the engine would send for each order type.
-[[nodiscard]] wire::Reject RejectOf(const wire::NewOrder &p_order, wire::Reason p_reason)
-{
-  return {.client_order_id_ = p_order.client_order_id_,
-          .symbol_id_ = p_order.symbol_id_,
-          .reason_ = p_reason};
-}
-
-[[nodiscard]] wire::CancelReject RejectOf(const wire::Cancel &p_cancel, wire::Reason p_reason)
-{
-  return {.client_order_id_ = p_cancel.client_order_id_,
-          .symbol_id_ = p_cancel.symbol_id_,
-          .reason_ = p_reason};
-}
-
-[[nodiscard]] wire::ReplaceReject RejectOf(const wire::Replace &p_replace, wire::Reason p_reason)
-{
-  return {.client_order_id_ = p_replace.client_order_id_,
-          .symbol_id_ = p_replace.symbol_id_,
-          .reason_ = p_reason};
-}
-
 } // namespace
 
 UniqueFd &UniqueFd::operator=(UniqueFd &&p_other) noexcept
@@ -398,11 +376,17 @@ template <typename O> void Gateway::OnOrder(SessionId p_session, const O &p_orde
     SendToSession(p_session, RejectOf(p_order, *reason));
     return;
   }
-  const Command command{.session_id_ = p_session, .symbol_slot_ = route->slot_, .order_ = p_order};
+  // A command that is not queued takes no place in the order.
+  const Command command{.op_number_ = OpNumber{last_op_.value_ + 1},
+                        .session_id_ = p_session,
+                        .symbol_slot_ = route->slot_,
+                        .order_ = p_order};
   if (!queues_[route->engine_].inbound_.TryPush(command))
   {
     SendToSession(p_session, RejectOf(p_order, wire::Reason::SystemBusy));
+    return;
   }
+  last_op_ = command.op_number_;
 }
 
 void Gateway::DrainOutbound()

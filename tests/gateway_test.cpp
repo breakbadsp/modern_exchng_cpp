@@ -121,7 +121,8 @@ public:
       outbound_.push_back(
           std::make_unique<SpscQueue<Report>>(config->gateway_.outbound_queue_capacity_));
       queues.push_back({*inbound_.back(), *outbound_.back()});
-      engines_.push_back(std::make_unique<Engine>(config->engines_[i].books_, *inbound_.back(),
+      engines_.push_back(std::make_unique<Engine>(config->engines_[i].books_,
+                                                  config->sessions_.size(), *inbound_.back(),
                                                   *outbound_.back()));
     }
     auto sockets = mex::OpenGatewaySockets(config->gateway_);
@@ -324,6 +325,14 @@ template <typename M> [[nodiscard]] M Next(const Client &p_client, std::uint64_t
           .qty_ = Quantity{p_qty}};
 }
 
+// p_order as request p_number of its session.
+template <typename O> [[nodiscard]] O Request(std::uint64_t p_number, const O &p_order)
+{
+  O order = p_order;
+  order.request_number_ = wire::RequestNumber{p_number};
+  return order;
+}
+
 [[nodiscard]] Report RejectFor(SessionId p_session, wire::ClientOrderId p_id)
 {
   return {.session_id_ = p_session,
@@ -454,15 +463,16 @@ TEST(GatewayTest, PartialAndCoalescedFramesAreReassembled)
 
   alice.SendByteByByte(AliceLogon());
   static_cast<void>(Next<wire::LogonAck>(alice, 1));
-  alice.SendByteByByte(Limit(1, 7, Side::Buy, 150, 10));
+  alice.SendByteByByte(Request(1, Limit(1, 7, Side::Buy, 150, 10)));
   const wire::Ack ack = Next<wire::Ack>(alice, 2);
   EXPECT_EQ(ack.client_order_id_, 1U);
   EXPECT_EQ(ack.leaves_, Quantity{10});
 
   // A Cancel and a NewOrder in one write.
   std::array<std::byte, 2 * wire::kMaxFrameSize> both{};
-  std::size_t size = wire::Encode(wire::Cancel{.client_order_id_ = 1, .symbol_id_ = 7}, both);
-  size += wire::Encode(Limit(2, 7, Side::Buy, 140, 5), std::span{both}.subspan(size));
+  std::size_t size =
+      wire::Encode(Request(2, wire::Cancel{.client_order_id_ = 1, .symbol_id_ = 7}), both);
+  size += wire::Encode(Request(3, Limit(2, 7, Side::Buy, 140, 5)), std::span{both}.subspan(size));
   alice.SendBytes(std::span{both}.first(size));
 
   EXPECT_EQ(Next<wire::CancelAck>(alice, 3),
@@ -521,12 +531,13 @@ TEST(GatewayTest, InvalidOrdersAreRejectedBeforeTheEngine)
                 .client_order_id_ = 8, .symbol_id_ = 7, .reason_ = Reason::PriceOutOfRange}));
 
   // Nothing above reached an engine: the next frames are this order's reports.
-  alice.Send(Limit(9, 7, Side::Buy, 200, 10)); // the band is inclusive
+  alice.Send(Request(1, Limit(9, 7, Side::Buy, 200, 10))); // the band is inclusive
   const wire::Ack ack = Next<wire::Ack>(alice, 10);
   EXPECT_EQ(ack.client_order_id_, 9U);
   EXPECT_EQ(ack.leaves_, Quantity{10});
   // A market order's price is not checked; on an empty book its remainder is Done.
-  alice.Send(wire::NewOrder{.client_order_id_ = 10,
+  alice.Send(wire::NewOrder{.request_number_ = wire::RequestNumber{2},
+                            .client_order_id_ = 10,
                             .symbol_id_ = 8,
                             .side_ = Side::Buy,
                             .type_ = wire::OrderType::Market,
@@ -547,15 +558,16 @@ TEST(GatewayTest, OrdersAreRoutedToTheirEngineAndSlot)
   bob.Send(BobLogon());
   static_cast<void>(Next<wire::LogonAck>(bob, 1));
 
-  const wire::NewOrder on_9 = Limit(1, 9, Side::Buy, 150, 10);
-  const wire::Cancel on_8{.client_order_id_ = 2, .symbol_id_ = 8};
+  const wire::NewOrder on_9 = Request(31, Limit(1, 9, Side::Buy, 150, 10));
+  const wire::Cancel on_8 = Request(32, wire::Cancel{.client_order_id_ = 2, .symbol_id_ = 8});
   alice.Send(on_9);
-  bob.Send(on_8);
-
   std::optional<Command> engine_0{};
-  std::optional<Command> engine_1{};
   EXPECT_TRUE(WaitFor([&] { return (engine_0 = exchange.Inbound(0).TryPop()).has_value(); }));
+  bob.Send(on_8);
+  std::optional<Command> engine_1{};
   EXPECT_TRUE(WaitFor([&] { return (engine_1 = exchange.Inbound(1).TryPop()).has_value(); }));
+
+  // The order_ of each command carries its request number.
   ASSERT_TRUE(engine_0.has_value() && engine_1.has_value());
   EXPECT_EQ(engine_0->session_id_, kAlice);
   EXPECT_EQ(engine_0->symbol_slot_, 1U);
@@ -563,6 +575,9 @@ TEST(GatewayTest, OrdersAreRoutedToTheirEngineAndSlot)
   EXPECT_EQ(engine_1->session_id_, kBob);
   EXPECT_EQ(engine_1->symbol_slot_, 0U);
   EXPECT_EQ(engine_1->order_, mex::ClientOrder{on_8});
+  // One total order over both engines, in arrival order at the gateway.
+  EXPECT_EQ(engine_0->op_number_, mex::OpNumber{1});
+  EXPECT_EQ(engine_1->op_number_, mex::OpNumber{2});
 }
 
 TEST(GatewayTest, FullInboundQueueRejectsWithSystemBusy)
@@ -592,7 +607,15 @@ TEST(GatewayTest, FullInboundQueueRejectsWithSystemBusy)
   const std::optional<Command> queued = exchange.Inbound(0).TryPop();
   ASSERT_TRUE(queued.has_value());
   EXPECT_EQ(queued->order_, mex::ClientOrder{Limit(1, 7, Side::Buy, 150, 10)});
+  EXPECT_EQ(queued->op_number_, mex::OpNumber{1});
   EXPECT_FALSE(exchange.Inbound(0).TryPop().has_value());
+
+  // The rejected orders took no op number.
+  alice.Send(Limit(3, 7, Side::Buy, 150, 10));
+  std::optional<Command> next{};
+  EXPECT_TRUE(WaitFor([&] { return (next = exchange.Inbound(0).TryPop()).has_value(); }));
+  ASSERT_TRUE(next.has_value());
+  EXPECT_EQ(next->op_number_, mex::OpNumber{2});
 }
 
 // ---------------------------------------------------------------------------
@@ -669,7 +692,7 @@ TEST(GatewayTest, SessionKeepsItsRestingOrderAcrossReconnect)
     const Client alice{exchange.Port()};
     alice.Send(AliceLogon());
     static_cast<void>(Next<wire::LogonAck>(alice, 1));
-    alice.Send(Limit(1, 7, Side::Buy, 150, 10));
+    alice.Send(Request(1, Limit(1, 7, Side::Buy, 150, 10)));
     EXPECT_EQ(Next<wire::Ack>(alice, 2).leaves_, Quantity{10});
   } // disconnect
 
@@ -685,8 +708,13 @@ TEST(GatewayTest, SessionKeepsItsRestingOrderAcrossReconnect)
                frame->seq_ == 1;
       }));
 
-  alice->Send(wire::Cancel{.client_order_id_ = 1, .symbol_id_ = 7});
-  EXPECT_EQ(Next<wire::CancelAck>(*alice, 2),
+  // The session also keeps its request numbers: a resend of request 1 is a duplicate.
+  alice->Send(Request(1, Limit(1, 7, Side::Buy, 150, 10)));
+  EXPECT_EQ(
+      Next<wire::Reject>(*alice, 2),
+      (wire::Reject{.client_order_id_ = 1, .symbol_id_ = 7, .reason_ = Reason::DuplicateRequest}));
+  alice->Send(Request(2, wire::Cancel{.client_order_id_ = 1, .symbol_id_ = 7}));
+  EXPECT_EQ(Next<wire::CancelAck>(*alice, 3),
             (wire::CancelAck{.client_order_id_ = 1, .symbol_id_ = 7}));
 }
 
@@ -700,22 +728,22 @@ TEST(GatewayTest, EndToEndTradeWithSeqPerSession)
   bob.Send(BobLogon());
   static_cast<void>(Next<wire::LogonAck>(bob, 1));
 
-  alice.Send(Limit(1, 7, Side::Buy, 150, 10));
+  alice.Send(Request(1, Limit(1, 7, Side::Buy, 150, 10)));
   const wire::Ack ack = Next<wire::Ack>(alice, 2);
   EXPECT_EQ(ack, (wire::Ack{.client_order_id_ = 1,
                             .symbol_id_ = 7,
                             .exchange_order_id_ = ack.exchange_order_id_, // informational
                             .leaves_ = Quantity{10}}));
-  alice.Send(wire::Replace{.client_order_id_ = 1,
-                           .symbol_id_ = 7,
-                           .new_price_ = Price{150},
-                           .new_total_qty_ = Quantity{6}});
+  alice.Send(Request(2, wire::Replace{.client_order_id_ = 1,
+                                      .symbol_id_ = 7,
+                                      .new_price_ = Price{150},
+                                      .new_total_qty_ = Quantity{6}}));
   EXPECT_EQ(
       Next<wire::ReplaceAck>(alice, 3),
       (wire::ReplaceAck{
           .client_order_id_ = 1, .symbol_id_ = 7, .price_ = Price{150}, .leaves_ = Quantity{6}}));
 
-  bob.Send(Limit(1, 7, Side::Sell, 140, 4));
+  bob.Send(Request(1, Limit(1, 7, Side::Sell, 140, 4)));
   EXPECT_EQ(Next<wire::Fill>(bob, 2), (wire::Fill{.exchange_order_id_ = mex::kNoExchangeOrderId,
                                                   .client_order_id_ = 1,
                                                   .symbol_id_ = 7,
@@ -732,10 +760,11 @@ TEST(GatewayTest, EndToEndTradeWithSeqPerSession)
                                                     .leaves_ = Quantity{2},
                                                     .liquidity_ = wire::Liquidity::Maker}));
 
-  alice.Send(wire::Cancel{.client_order_id_ = 1, .symbol_id_ = 7});
+  alice.Send(Request(3, wire::Cancel{.client_order_id_ = 1, .symbol_id_ = 7}));
   EXPECT_EQ(Next<wire::CancelAck>(alice, 5),
             (wire::CancelAck{.client_order_id_ = 1, .symbol_id_ = 7}));
-  bob.Send(Limit(2, 8, Side::Sell, 120, 3));
+  // Engine 1 has seen no request of bob, so request 2 is above its last one.
+  bob.Send(Request(2, Limit(2, 8, Side::Sell, 120, 3)));
   const wire::Ack on_engine_1 = Next<wire::Ack>(bob, 4);
   EXPECT_EQ(on_engine_1.symbol_id_, 8U);
   EXPECT_EQ(on_engine_1.leaves_, Quantity{3});
