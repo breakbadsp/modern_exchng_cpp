@@ -87,13 +87,15 @@ void OnStopSignal(int) { stop_requested.store(true, std::memory_order_relaxed); 
 // What main owns for one engine. The Engine itself lives on its thread.
 struct EngineSlot
 {
-  EngineSlot(const mex::EngineConfig &p_config, const mex::GatewayConfig &p_gateway)
-      : config_{p_config}, inbound_{p_gateway.inbound_queue_capacity_},
-        outbound_{p_gateway.outbound_queue_capacity_}
+  EngineSlot(const mex::EngineConfig &p_config, const Config &p_exchange)
+      : config_{p_config}, session_count_{p_exchange.sessions_.size()},
+        inbound_{p_exchange.gateway_.inbound_queue_capacity_},
+        outbound_{p_exchange.gateway_.outbound_queue_capacity_}
   {
   }
 
   const mex::EngineConfig &config_;
+  std::size_t session_count_;
   SpscQueue<Command> inbound_;
   SpscQueue<Report> outbound_;
   std::uint64_t stalls_ = 0; // written by the engine thread before it ends
@@ -117,7 +119,7 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
     std::println(stderr, "mex_exchange: warning: engine thread not pinned to core {}: {}",
                  p_slot.config_.core_, std::strerror(pinned.error()));
   }
-  Engine engine{p_slot.config_.books_, p_slot.inbound_, p_slot.outbound_};
+  Engine engine{p_slot.config_.books_, p_slot.session_count_, p_slot.inbound_, p_slot.outbound_};
   // The callback runs on the thread that requests the stop. The destructor of
   // stop_engine waits for a running callback, so engine outlives it.
   const std::stop_callback stop_engine{p_stop, [&engine] { engine.Stop(); }};
@@ -145,7 +147,7 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
   std::vector<EngineQueues> queues;
   for (const mex::EngineConfig &engine_config : p_config.engines_)
   {
-    slots.push_back(std::make_unique<EngineSlot>(engine_config, p_config.gateway_));
+    slots.push_back(std::make_unique<EngineSlot>(engine_config, p_config));
     queues.push_back({slots.back()->inbound_, slots.back()->outbound_});
   }
 

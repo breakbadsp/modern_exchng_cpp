@@ -9,7 +9,9 @@ Same working style as `design-spec.md`: build one step at a time, and
 surface tension with a locked decision instead of silently revisiting it.
 
 **Status:** the v1 decisions below were **locked** on 2026-11-07. Items
-under "Still open" are not decided yet.
+under "Still open" are not decided yet. On 2026-11-10 the
+[replication preparation](#replication-preparation-locked) changed some of
+them; each changed decision is marked "Changed 2026-11-10" with its reason.
 
 ## Guiding principle (locked)
 
@@ -34,6 +36,8 @@ else above matching lives in the Engine.
 | Engine (thread loop around `Book`s, order metadata, reports) | Done — `src/engine.hpp` |
 | Gateway (sockets, sessions, framing, routing, writes) | Done — `src/gateway.hpp` |
 | `main` + load-generator client | Done — `src/main.cpp`, `tools/loadgen.cpp` |
+| Replication preparation (request and op numbers, `Engine::Apply`, state digest) | Done — `src/engine.hpp` |
+| Replication (VSR replicas, log, view change, journal) | Not started; out of scope here |
 
 `Book` is the matching logic only. It does not own a thread, a queue,
 client identities, or outbound messages. The Engine is the thin layer that
@@ -65,7 +69,8 @@ adds those.
    - Accepts connections, checks logon, reads bytes, reassembles frames,
      validates fields.
    - Maps `symbol_id → (engine, symbol_slot)` and pushes a command onto
-     that engine's inbound queue. Every command carries the `SessionId`.
+     that engine's inbound queue. Every command carries the `SessionId`
+     and an op number (see "Replication preparation").
    - Drains every engine's outbound queue and writes each report to the
      connection of its session.
    - Holds session state (logon, outbound sequence number) and **no order
@@ -73,8 +78,10 @@ adds those.
 2. **Engine** (N threads)
    - Owns one or more `Book`s plus per-order metadata and a client-id
      index for each.
-   - Pops a command, calls `Book`, converts `SubmitResult` + `Fills()` into
-     outbound reports.
+   - Pops a command and applies it: checks the request number, calls
+     `Book`, and converts `SubmitResult` + `Fills()` into outbound reports.
+   - Keeps the client table (the last applied request number for each
+     session) and the last applied op number.
    - No syscalls, no locks, no allocation after startup.
 3. **SPSC queues**
    - Fixed power-of-two capacity, allocated at startup.
@@ -101,6 +108,9 @@ Ordering guarantees that follow:
 - Per symbol: total order. One gateway and one FIFO queue per engine, so
   arrival order at the gateway is priority order in the book.
 - Per client across symbols: none. Acceptable.
+- Across engines: the op number gives one total order of the accepted
+  commands (Changed 2026-11-10; a replicated log needs it). The engines
+  still apply their commands in parallel.
 
 Threads are pinned and busy-poll. A backoff (pause → yield) mode is useful
 for development machines so idle engines do not burn cores.
@@ -136,9 +146,9 @@ wire.
 | Client → Exchange | Exchange → Client |
 |---|---|
 | `Logon{session_name, token}` | `LogonAck` / `LogonReject{reason}` |
-| `NewOrder{client_order_id u64, symbol_id u32, side, type, price i64, qty u32}` | `Ack{client_order_id, symbol_id, exchange_order_id, leaves}` |
-| `Cancel{client_order_id, symbol_id}` | `Reject{client_order_id, reason}` |
-| `Replace{client_order_id, symbol_id, new_price i64, new_total_qty u32}` | `Fill{exchange_order_id, client_order_id, price, qty, leaves, liquidity}` |
+| `NewOrder{request_number u64, client_order_id u64, symbol_id u32, side, type, price i64, qty u32}` | `Ack{client_order_id, symbol_id, exchange_order_id, leaves}` |
+| `Cancel{request_number, client_order_id, symbol_id}` | `Reject{client_order_id, reason}` |
+| `Replace{request_number, client_order_id, symbol_id, new_price i64, new_total_qty u32}` | `Fill{exchange_order_id, client_order_id, price, qty, leaves, liquidity}` |
 | | `CancelAck` / `CancelReject{reason}` |
 | | `ReplaceAck{client_order_id, price, leaves}` / `ReplaceReject{reason}` |
 | | `Done{client_order_id, reason}` — leaves dropped |
@@ -152,6 +162,11 @@ wire.
   symbol, so without it a report can be ambiguous.
 - `exchange_order_id` is informational in v1. Cancel and Replace use
   `client_order_id` (see below).
+- Changed 2026-11-10: `NewOrder`, `Cancel`, and `Replace` start with a
+  `u64 request_number`. Reason: replication must not execute a retried
+  request twice, and `client_order_id` cannot show that, because it is free
+  again when its order is filled or cancelled. The rules are in
+  "Replication preparation".
 
 ### Gateway validation (locked)
 
@@ -191,7 +206,8 @@ class ClientOrderIndex;
   only among **live** (resting) orders. Each book has its own index.
 - **Duplicate.** A `NewOrder` whose key is already live is rejected with
   `Reject{DuplicateClientOrderId}` before `Book` is called. An id of a
-  filled, canceled, or done order may be reused.
+  filled, canceled, or done order may be reused. This rule is about order
+  ids. A repeated request is found by its request number, before this check.
 - **Why the engine owns the index.** New, Cancel, and Replace for one
   order go through the same gateway and the same queue, in order. So a
   Cancel sent right after a New always finds the order, even before the
@@ -288,6 +304,8 @@ Allocated once at startup, never grown:
 - All SPSC rings.
 - Each engine's `Book`s, their `OrderMeta` arrays, and their
   `ClientOrderIndex` tables.
+- Each engine's client table: one request number for each configured
+  session.
 
 Exceeding any of them is an explicit reject or disconnect, consistent with
 `design-spec.md`.
@@ -334,9 +352,127 @@ Stated so each one is a decision, not an accident:
   engine.
 - **Journal / recovery.** A crash loses the book.
 - **Resend / replay** of exchange → client frames after reconnect.
+- **Replication.** "Replication preparation" lists what is installed and
+  what each missing part needs.
 - **Market data feed.** Would be an extra outbound queue per engine.
 - **FIX**, **TLS**, **multiple gateways**, **kernel bypass**. Transport is
   kernel TCP with non-blocking sockets and level-triggered epoll.
+
+## Replication preparation (locked)
+
+Locked on 2026-11-10. A Viewstamped Replication (VSR) library will later
+make several copies of the exchange agree on one ordered sequence of
+commands. Nothing here replicates. These are the fields, the state, and the
+seams that replication needs, and the single-process exchange works as
+before.
+
+The replicated state machine is the `Engine`. Its state and its reports
+depend only on its configuration and on the commands it applied, in order.
+All replicas must use the same configuration: book capacities, symbol
+slots, and the session list.
+
+### Request identity
+
+- `NewOrder`, `Cancel`, and `Replace` carry a `request_number`
+  (`wire::RequestNumber`). The session, not the connection, owns the
+  sequence. The client starts at 1 and uses a higher number for each new
+  request, also after a reconnect. A retry repeats the request unchanged,
+  with its number.
+- Each engine keeps a **client table**: for each session, the last request
+  number that this engine applied. The table is in the engine because it
+  is replicated state: every replica must make the same decision about a
+  retry. The session list is fixed, so the table has a fixed size and no
+  eviction.
+- A session can send to several engines. The symbol selects the engine, so
+  a retry reaches the engine that got the first attempt. One engine sees
+  increasing numbers with gaps.
+- **Duplicate outcome.** A request whose number is not above the last
+  applied number of its session at that engine is not executed. It gets
+  exactly one report: the reject of its type (`Reject`, `CancelReject`, or
+  `ReplaceReject`) with reason `DuplicateRequest`. The client table and the
+  books do not change. This covers a retry of an applied request, a number
+  sent out of order, and number 0.
+- Why a reject: each request keeps exactly one final report, the engine
+  stores nothing more than one number for each session, and the client
+  gets an explicit answer. The reject says that the engine did not execute
+  the request now. It does not carry the result of the first attempt.
+- A request that the gateway rejects (`UnknownSymbol`, `InvalidQuantity`,
+  `PriceOutOfRange`, `SystemBusy`) does not reach an engine and does not
+  use its number there. If later requests of the session were applied by
+  that engine, the client sends the rejected request again with a new,
+  higher number.
+- **Not done: resend of the earlier reply.** It needs a `request_number`
+  in every report, and a store of the reports of earlier requests in the
+  replicated state of the engine. A request has a variable number of
+  reports (fills), and clients send many requests before the first reply,
+  so the store must hold a window of requests for each session, with a
+  fixed size and a rule for a retry older than the window. The fills of
+  the makers go to other sessions; they belong to "Resend of reports"
+  below.
+
+### Operation number
+
+- Every `Command` carries an `OpNumber`: its position in the one total
+  order over all engines. The first command is 1.
+- For now the gateway assigns it from one counter, when it pushes the
+  command to an engine. A command that is not queued (`SystemBusy`) takes
+  no number. This counter stands in for the replicated log.
+- Each engine records the last op it applied. `Engine::Apply` has the
+  precondition that the op number is above it. One engine sees gaps,
+  because other engines apply the ops between.
+- `Command` grew from 48 to 64 bytes: 8 for the request number in each
+  order and 8 for the op number.
+
+### Apply seam
+
+`Engine::Apply(const Command &)` applies one command to the state machine
+and pushes its reports. `Engine::ProcessOne` is a pop from the inbound queue
+plus `Apply`. A later caller can drive the engine from a committed log
+entry with `Apply`. There is no other new abstraction.
+
+### State digest
+
+`Engine::StateDigest()` returns a 64-bit digest of all replicated state, in
+this order: the last applied op; the client table by session id; then for
+each book by symbol slot: its symbol id; the bids and then the asks, each
+level in ladder order (price, order count) and each order in time priority
+(slot, quantity, owner, client_order_id, filled quantity, and the slot that
+the client-order index gives for its key); the size of the index; the
+generation of every slot; and the free slots in stack order.
+
+- Slot numbers, generations, and the order of the free slots are part of
+  the state, because `exchange_order_id` shows them to clients.
+- The digest does not use addresses or the probe layout of the index.
+- It is not a cryptographic hash. It finds divergence; it does not protect
+  against a hostile replica.
+
+`tests/engine_test.cpp` (`EngineDeterminismTest`) feeds one generated
+command sequence to two independent engines, one through its queue and one
+through `Apply`, and requires equal reports and equal digests after every
+command.
+
+### Still out of scope, and what each needs
+
+- **Snapshot and restore.** A serial form of exactly the state that the
+  digest covers, written at an op boundary. `Book` needs a restore
+  operation that puts an order into a given slot and sets the free-slot
+  order; today only `Rest` assigns slots. The index can be built again
+  from the orders. After a restore the digest must equal the digest stored
+  with the snapshot. With several engines, a snapshot of the exchange
+  needs all engines stopped at one op number.
+- **Resend of reports after reconnect.** A report sequence that belongs to
+  the session and continues across logons, a fixed store of sent reports
+  for each session, and a client message that asks for the reports from a
+  sequence number. The `seq` of today cannot be used: the gateway assigns
+  it in the order in which it drains the engines, which depends on thread
+  timing when a session trades on more than one engine. A replicated
+  sequence must come from the engines.
+- **Report sink for backups.** A backup applies the same commands and
+  discards the reports. Today `Emit` pushes to the outbound queue and
+  spins while it is full, so an engine without a gateway that drains
+  stops. The engine needs a sink that it selects at construction and can
+  switch at promotion (queue or discard), without a virtual call on each
+  report.
 
 ## Still open
 

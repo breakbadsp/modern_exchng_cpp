@@ -18,6 +18,11 @@
 // Engine thread around one or more Books (prep/io-design-spec.md, step 4).
 // It pops commands from its inbound queue, calls Book, and pushes order reports
 // to its outbound queue. All storage is allocated in the constructor.
+//
+// The Engine is a deterministic state machine: its state and its reports
+// depend only on its configuration and on the commands it applied, in order.
+// It reads no clock, random value, or address. Replication relies on this
+// (prep/io-design-spec.md, "Replication preparation").
 namespace mex
 {
 
@@ -44,9 +49,20 @@ struct OrderMeta
 
 using ClientOrder = std::variant<wire::NewOrder, wire::Cancel, wire::Replace>;
 
+// Position of a command in the one total order over all engines. The first
+// command is 1, so 0 means none. Distinct from wire::RequestNumber, which a
+// client assigns.
+struct OpNumber
+{
+  std::uint64_t value_ = 0;
+
+  constexpr auto operator<=>(const OpNumber &) const = default;
+};
+
 // Gateway -> engine. symbol_slot_ selects the Book inside this engine.
 struct Command
 {
+  OpNumber op_number_{};
   SessionId session_id_ = 0;
   std::uint32_t symbol_slot_ = 0;
   ClientOrder order_{};
@@ -66,6 +82,9 @@ struct Report
 };
 
 static_assert(std::is_trivially_copyable_v<Command>);
+// One cache line for each inbound ring slot. It was 48 bytes before the
+// request number (8 bytes in each order) and the op number (8 bytes).
+static_assert(sizeof(Command) == 64);
 static_assert(std::is_trivially_copyable_v<Report>);
 
 // Live (resting) orders of one Book, keyed by (owner, client_order_id).
@@ -127,22 +146,48 @@ struct BookConfig
 //   Cancel:   CancelAck or CancelReject.
 //   Replace:  ReplaceAck (leaves 0 if fully filled) or ReplaceReject.
 // The commands are checked by the gateway; contracts catch a routing bug.
+//
+// A request executes at most once. The client table holds, for each session,
+// the last request number this engine applied. A request whose number is not
+// above it changes no order state and gets only the reject of its type with
+// Reason::DuplicateRequest. A session can send to several engines, so the
+// numbers that one engine sees can have gaps.
 // clang-format off
 class Engine final
 {
 public:
-  // Book i serves symbol_slot_ i.
-  Engine(std::span<const BookConfig> p_books, SpscQueue<Command> &p_inbound, SpscQueue<Report> &p_outbound)
-    pre (!p_books.empty());
+  // Book i serves symbol_slot_ i. Commands carry a session_id_ below p_session_count.
+  Engine(std::span<const BookConfig> p_books, std::size_t p_session_count,
+         SpscQueue<Command> &p_inbound, SpscQueue<Report> &p_outbound)
+    pre (!p_books.empty())
+    pre (p_session_count > 0);
   Engine(const Engine &) = delete;
   Engine &operator=(const Engine &) = delete;
   Engine(Engine &&) = delete;
   Engine &operator=(Engine &&) = delete;
   ~Engine();
 
-  // Engine thread only. Handles at most one command; returns false if the
-  // inbound queue was empty. Spins while the outbound queue is full.
+  // Engine thread only. Pops at most one command and applies it; returns false
+  // if the inbound queue was empty.
   [[nodiscard]] bool ProcessOne();
+
+  // Engine thread only. Applies one command to the state machine and pushes
+  // its reports. Spins while the outbound queue is full. A caller that takes
+  // commands from another source, such as a replicated log, calls this.
+  void Apply(const Command &p_command)
+    pre (p_command.op_number_ > LastAppliedOp());
+
+  // Engine thread only.
+  [[nodiscard]] OpNumber LastAppliedOp() const;
+
+  // Engine thread only. A digest of all replicated state: the last applied op,
+  // the client table, and for each book its resting orders in price-time
+  // order with their metadata and client-order index entries, each slot's
+  // generation, and the free slots. Slot numbers are part of the state because
+  // exchange_order_id shows them. The digest does not depend on addresses or
+  // on the probe layout of the index. Engines with equal configuration that
+  // applied the same commands have equal digests.
+  [[nodiscard]] std::uint64_t StateDigest() const;
 
   // Engine thread only. Busy-polls the inbound queue until Stop().
   void Run();
@@ -156,9 +201,9 @@ public:
 private:
   struct Instrument;
 
-  void OnNewOrder(SessionId p_session, Instrument &p_inst, const wire::NewOrder &p_order);
-  void OnCancel(SessionId p_session, Instrument &p_inst, const wire::Cancel &p_cancel);
-  void OnReplace(SessionId p_session, Instrument &p_inst, const wire::Replace &p_replace);
+  void Execute(SessionId p_session, Instrument &p_inst, const wire::NewOrder &p_order);
+  void Execute(SessionId p_session, Instrument &p_inst, const wire::Cancel &p_cancel);
+  void Execute(SessionId p_session, Instrument &p_inst, const wire::Replace &p_replace);
 
   [[nodiscard]] wire::ExchangeOrderId Settle(Instrument &p_inst, const SubmitResult &p_result,
                                              const OrderMeta &p_taker, Quantity p_leaves,
@@ -169,6 +214,8 @@ private:
   void Emit(SessionId p_session, const OrderReport &p_report);
 
   std::vector<std::unique_ptr<Instrument>> instruments_{};
+  std::vector<wire::RequestNumber> client_table_{}; // by SessionId; 0 means none applied
+  OpNumber last_applied_op_{};
   SpscQueue<Command> &inbound_;
   SpscQueue<Report> &outbound_;
   std::atomic<bool> stop_{false};

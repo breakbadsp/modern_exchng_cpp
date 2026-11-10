@@ -45,6 +45,8 @@ Measured on 2026-11-07: Intel Core i5-9500 (6 cores, no SMT), Linux 7.2.15, GCC 
 | Open loop, 200k ops/s | 199,999 | 27.5 | 81.3 | 564.9 |
 | Open loop, 500k ops/s | 499,935 | 2523.0 | 7935.7 | 8259.8 |
 
+The tables in this file are from before 2026-11-10. On that date each order message got a request number and each command an op number (`prep/io-design-spec.md`, "Replication preparation"): `Command` grew from 48 to 64 bytes and the NewOrder, Cancel, and Replace frames by 8 bytes. A comparison on that date, with 5 interleaved runs for each load, showed no end-to-end difference above the run-to-run variation. The machine also ran another exchange, so the tables were not replaced. A single-thread loop of push, `Engine::ProcessOne`, and drain took about 73 ns for each command, against 69 ns before.
+
 Capacity is above the 100k–500k target. The open loop at 500k ops/s holds the rate, but the latency is open: from about 300k ops/s, the reports stop for 2–8 ms at a time, so the window fills and the latency becomes window / rate. During these gaps the gateway and engine threads do not sleep (no voluntary context switches), and the gateway's send buffer does not overflow. The gaps also stay when the gateway, the engines, and the client are on separate cores, with a busy-polling client reader, and with `TCP_QUICKACK`. They occur only when the client sends many small TCP segments. Closed-loop runs send large batches and show no gaps. The cause is not found yet.
 
 Reproduce (change `gateway port` if 9000 is in use):
@@ -146,7 +148,7 @@ TigerBeetle (`src/message_bus.zig`, `src/stdx/io/linux.zig`, `src/message_buffer
 |---|---|---|
 | I/O model | readiness (epoll), then `recv`/`send` | completion (io_uring): the kernel copies into buffers given in advance |
 | Wait | busy-poll, `epoll_wait` timeout 0 | blocks in `io_uring_enter` until a completion or a deadline |
-| Message | 15–44 bytes, one order | up to `message_size_max` (MiB scale), up to 8,190 events |
+| Message | 23–48 bytes, one order or report | up to `message_size_max` (MiB scale), up to 8,190 events |
 | Requests in flight for each client | many | one |
 | Receive buffer for each connection | 64 frames | one full-size message |
 | Send | one byte buffer for each connection, one `send` for all reports of a loop | each message sent from its pool buffer; tries a direct non-blocking send first, then io_uring |

@@ -248,7 +248,9 @@ TEST(AllocCount, EngineCommandsDoNotCallOperatorNew)
   const mex::BookConfig config{.symbol_id_ = 1, .max_orders_ = 256, .max_price_levels_ = 32};
   mex::SpscQueue<mex::Command> inbound{1024};
   mex::SpscQueue<mex::Report> outbound{1024};
-  mex::Engine engine{std::span<const mex::BookConfig>{&config, 1}, inbound, outbound};
+  constexpr std::size_t kSessionCount = 2;
+  mex::Engine engine{std::span<const mex::BookConfig>{&config, 1}, kSessionCount, inbound,
+                     outbound};
 
   std::uint64_t state = 0x1234cafef00dULL;
   auto next = [&state]()
@@ -266,7 +268,10 @@ TEST(AllocCount, EngineCommandsDoNotCallOperatorNew)
   for (std::uint32_t i = 0; i < kOps; ++i)
   {
     // Small id space per session, so duplicates, unknown ids, and replaces all occur.
-    mex::Command command{.session_id_ = static_cast<mex::SessionId>(next() % 2U)};
+    // One request in 16 repeats the number of the command before it.
+    const mex::wire::RequestNumber request{i + (next() % 16U == 0U ? 0U : 1U)};
+    mex::Command command{.op_number_ = mex::OpNumber{std::uint64_t{i} + 1},
+                         .session_id_ = static_cast<mex::SessionId>(next() % kSessionCount)};
     const mex::wire::ClientOrderId id = next() % 128U;
     const mex::Price price{static_cast<std::int64_t>(100 + next() % 16U)};
     const mex::Quantity qty{static_cast<std::uint32_t>(1 + next() % 8U)};
@@ -274,6 +279,7 @@ TEST(AllocCount, EngineCommandsDoNotCallOperatorNew)
     if (pick < 6U)
     {
       command.order_ = mex::wire::NewOrder{
+          .request_number_ = request,
           .client_order_id_ = id,
           .symbol_id_ = 1,
           .side_ = (next() & 1U) == 0U ? mex::Side::Buy : mex::Side::Sell,
@@ -283,12 +289,16 @@ TEST(AllocCount, EngineCommandsDoNotCallOperatorNew)
     }
     else if (pick < 8U)
     {
-      command.order_ = mex::wire::Cancel{.client_order_id_ = id, .symbol_id_ = 1};
+      command.order_ =
+          mex::wire::Cancel{.request_number_ = request, .client_order_id_ = id, .symbol_id_ = 1};
     }
     else
     {
-      command.order_ = mex::wire::Replace{
-          .client_order_id_ = id, .symbol_id_ = 1, .new_price_ = price, .new_total_qty_ = qty};
+      command.order_ = mex::wire::Replace{.request_number_ = request,
+                                          .client_order_id_ = id,
+                                          .symbol_id_ = 1,
+                                          .new_price_ = price,
+                                          .new_total_qty_ = qty};
     }
     if (!inbound.TryPush(command) || !engine.ProcessOne())
     {
