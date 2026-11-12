@@ -276,6 +276,8 @@ class Game:
                 raise ValueError('The game is stopping')
             if self.verifying:
                 raise ValueError('Wait for state verification to finish')
+            if action in ('verify', 'heal') and index is not None:
+                raise ValueError(f'{action} takes no replica number')
             if action == 'verify':
                 self.verifying = True
                 self.error = None
@@ -458,18 +460,20 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get('Origin')
         port = self.server.server_port
         allowed = (f'http://127.0.0.1:{port}', f'http://localhost:{port}')
-        if (origin is not None and origin not in allowed) or self.headers.get('Content-Type') != 'application/json':
+        # Compare only the media type. Clients often add '; charset=utf-8'.
+        media_type = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
+        if (origin is not None and origin not in allowed) or media_type != 'application/json':
             self.reply(403, b'{"error":"Same-origin JSON required"}')
             return
         try:
             if self.path != '/api/action':
                 raise ValueError('Unknown endpoint')
-            length = int(self.headers.get('Content-Length', '0'))
-            if not 0 < length <= 256:
+            length = self.headers.get('Content-Length', '0')
+            if not length.isdigit() or not 0 < int(length) <= 256:
                 raise ValueError('Invalid request length')
-            body = json.loads(self.rfile.read(length))
-            if not isinstance(body, dict):
-                raise ValueError('Expected an object')
+            body = json.loads(self.rfile.read(int(length)))
+            if not isinstance(body, dict) or not set(body) <= {'action', 'replica'}:
+                raise ValueError('Expected an object with only action and replica')
             self.server.game.action(body.get('action'), body.get('replica'))
             self.reply(200, b'{"ok":true}')
         except (ValueError, TypeError) as error:
@@ -495,7 +499,10 @@ def main():
 
     def shutdown(*_):
         raise KeyboardInterrupt
+    # A shell starts a background job with SIGINT ignored. Set both handlers,
+    # so Ctrl+C and kill -INT or -TERM always stop the game and its replicas.
     signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
     try:
         game = Game(args.exchange.resolve(), args.rate)
         server.game = game
