@@ -18,6 +18,8 @@ import statistics
 import subprocess
 import time
 
+from perf_control import run_perf
+
 LEVELS = (1, 64, 1024)
 LATENCY_CYCLES = 200000
 MAX_CYCLES = 100000000  # bench_client batch limit
@@ -40,7 +42,8 @@ args = parser.parse_args()
 
 
 def run(command, **options):
-    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=root, **options)
+    result = (run_perf(command, cwd=root) if command[:2] == ['perf', 'stat'] else
+              subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=root, **options))
     if result.returncode:
         raise SystemExit(f'{" ".join(map(str, command))} failed:\n{result.stdout}')
     return result.stdout
@@ -57,6 +60,8 @@ def check_arguments():
         value = getattr(args, option)
         if not 0 < value <= MAX_CYCLES:
             parser.error(f'--{option.replace("_", "-")} must be 1..{MAX_CYCLES}')
+    if args.stat_cycles < 10000:
+        parser.error('--stat-cycles must be at least 10000 to amortize perf control overhead')
     if args.cpu not in os.sched_getaffinity(0):
         parser.error(f'--cpu {args.cpu} is not in this process affinity')
     names = set()
@@ -115,7 +120,7 @@ def measure():
                 'governor': governor.read_text().strip() if governor.exists() else 'unknown',
                 'head': run(['git', 'rev-parse', 'HEAD']).strip(), 'status': run(['git', 'status', '--short']),
                 'rounds': args.rounds, 'cycles': args.cycles, 'latency_rounds': args.latency_rounds,
-                'stat_cycles': args.stat_cycles, 'variant_order': [name for name, _, _ in variants],
+                'stat_cycles': args.stat_cycles, 'counter_region': 'acknowledged loop window; fixed control/timer overhead included', 'variant_order': [name for name, _, _ in variants],
                 'variants': info}
     (output / 'metadata.json').write_text(json.dumps(metadata, indent=2))
     pin = ['taskset', '-c', str(args.cpu)]
@@ -144,10 +149,12 @@ def measure():
     for name, _, _ in variants:
         for levels in LEVELS:
             text = run(['perf', 'stat', '-x', ',', '-e', STAT_EVENTS, '--'] + pin +
-                       [info[name]['binary'], 'batch', str(args.stat_cycles), str(levels)])
+                       [info[name]['binary'], 'perf', str(args.stat_cycles), str(levels)])
             operations = args.stat_cycles * 8
             counters[f'{name}/{levels}'] = {row.split(',')[2].split(':')[0]: int(row.split(',')[0]) / operations
                                             for row in text.splitlines() if row.split(',')[0].isdigit()}
+            if set(counters[f'{name}/{levels}']) != {'cycles', 'instructions', 'branches', 'branch-misses'}:
+                raise SystemExit('Incomplete perf counters; increase --stat-cycles or check perf access')
     (output / 'raw.json').write_text(json.dumps({'batch': batch, 'latency': latency, 'counters': counters,
                                                 'book': book}, indent=2))
 

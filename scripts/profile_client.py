@@ -14,6 +14,8 @@ import statistics
 import subprocess
 import time
 
+from perf_control import run_perf
+
 LEVELS = (1, 64, 1024)
 REPEATS = 5
 
@@ -28,7 +30,8 @@ args = parser.parse_args()
 
 
 def run(name, command):
-    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=root)
+    result = (run_perf(command, cwd=root) if command[:2] in (['perf', 'stat'], ['perf', 'record']) else
+              subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=root))
     (output / name).write_text(result.stdout)
     if result.returncode:
         raise SystemExit(f'{name} failed: {result.stdout}')
@@ -48,7 +51,7 @@ def measure():
                 'compiler': run('compiler.txt', [compiler, '--version']),
                 'head': run('head.txt', ['git', 'rev-parse', 'HEAD']).strip(),
                 'status': run('status.txt', ['git', 'status', '--short']),
-                'contracts': 'ignore', 'optimization': f'-O3, LTO {args.lto}, frame pointers'}
+                'contracts': 'ignore', 'counter_region': 'acknowledged loop window; fixed control/timer overhead included', 'optimization': f'-O3, LTO {args.lto}, frame pointers'}
     (output / 'metadata.json').write_text(json.dumps(metadata, indent=2))
     prefix = ['taskset', '-c', str(args.cpu)]
     client = str(build / 'bench_client')
@@ -57,7 +60,7 @@ def measure():
         for repeat in range(REPEATS):
             run(f'batch_{levels}_{repeat}.txt', prefix + [client, 'batch', '1000000', str(levels)])
             run(f'latency_{levels}_{repeat}.txt', prefix + [client, 'latency', '200000', str(levels)])
-        command = prefix + [client, 'batch', '20000000', str(levels)]
+        command = prefix + [client, 'perf', '20000000', str(levels)]
         run(f'stat_{levels}.txt', ['perf', 'stat', '-e',
             'task-clock,cycles:u,instructions:u,branches:u,branch-misses:u,cache-references:u,cache-misses:u,context-switches,cpu-migrations,page-faults',
             '--'] + command)
@@ -76,6 +79,8 @@ if args.summarize_only:
         parser.error('--summarize-only needs --output')
     output = args.output.resolve()
 else:
+    if args.cpu not in os.sched_getaffinity(0):
+        parser.error(f'--cpu {args.cpu} is not in this process affinity')
     output = (args.output or root / 'build' / time.strftime('client_profile_%Y%m%dT%H%M%SZ', time.gmtime())).resolve()
     if output.exists():
         parser.error(f'{output} exists; choose a new --output so that earlier recordings stay')
