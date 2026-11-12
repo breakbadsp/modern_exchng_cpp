@@ -57,6 +57,11 @@ MISSIONS = [
 ]
 
 
+def exit_reason(code):
+    """Describe a Popen return code for a person."""
+    return f'signal {signal.Signals(-code).name}' if code < 0 else f'exit code {code}'
+
+
 def frame(kind, body):
     return HEADER.pack(HEADER.size + len(body), kind) + body
 
@@ -129,6 +134,8 @@ class Game:
         self.processes = [None] * REPLICA_COUNT
         self.paused = [False] * REPLICA_COUNT
         self.logs = [None] * REPLICA_COUNT
+        # True when the controller stopped the process, or reported its exit.
+        self.exit_known = [False] * REPLICA_COUNT
         self.acks = 0
         self.duplicates = 0
         self.fills = 0
@@ -173,9 +180,11 @@ class Game:
             # Report that here, not as seven crashed cards in the page.
             time.sleep(.3)
             for index in REPLICAS:
-                if self.processes[index].poll() is not None:
-                    log = (self.work / f'replica{index}.log').read_text(errors='replace').strip()
-                    raise RuntimeError(f'Replica {index} stopped during startup: {log[-300:]}')
+                code = self.processes[index].poll()
+                if code is not None:
+                    path = self.work / f'replica{index}.log'
+                    log = path.read_text(errors='replace').strip()[-300:] or f'its log {path} is empty'
+                    raise RuntimeError(f'Replica {index} stopped during startup with {exit_reason(code)}: {log}')
             self.worker = threading.Thread(target=self.run, name='game-orders')
             self.worker.start()
         except BaseException:
@@ -200,6 +209,18 @@ class Game:
                 self.logs[index].close()
                 raise
             self.paused[index] = False
+            self.exit_known[index] = False
+
+    def note_exits(self):
+        """Add a timeline line for each replica that exited without a request."""
+        with self.lock:
+            for index in REPLICAS:
+                proc = self.processes[index]
+                if self.exit_known[index] or self.stop.is_set() or proc.poll() is None:
+                    continue
+                self.exit_known[index] = True
+                self.event(f'Replica {index} exited unexpectedly with {exit_reason(proc.returncode)}. '
+                           f'See {self.work / f"replica{index}.log"}.')
 
     def state(self, index):
         proc = self.processes[index]
@@ -226,6 +247,7 @@ class Game:
                     verifying = self.verifying
                 if not verifying:
                     self.trade()
+            self.note_exits()
             now = time.monotonic()
             with self.lock:
                 if now >= next_sample:
@@ -296,6 +318,7 @@ class Game:
             if action == 'restart':
                 changed = self.heal(index)
             elif action == 'crash' and state != 'stopped':
+                self.exit_known[index] = True
                 proc.kill()
                 proc.wait(timeout=3)
                 self.logs[index].close()
@@ -358,6 +381,8 @@ class Game:
                 self.progress('Stopping all replicas to read their state digests.', REPLICA_COUNT)
                 self.stop.wait(1)
                 offsets = [(self.work / f'replica{i}.log').stat().st_size for i in REPLICAS]
+                with self.lock:
+                    self.exit_known = [True] * REPLICA_COUNT
                 for proc in self.processes:
                     proc.send_signal(signal.SIGINT)
                 for proc in self.processes:
