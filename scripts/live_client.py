@@ -16,9 +16,10 @@ import threading
 import time
 
 HEADER = struct.Struct('<HB')
-NEW = struct.Struct('<QIBBqI')
-CANCEL = struct.Struct('<QI')
-REPLACE = struct.Struct('<QIqI')
+NEW = struct.Struct('<QQIBBqI')
+CANCEL = struct.Struct('<QQI')
+ORDER_KEY = struct.Struct('<QI')
+REPLACE = struct.Struct('<QQIqI')
 ACK = struct.Struct('<QIQI')
 FILL = struct.Struct('<QQIqIIB')
 REPLACE_ACK = struct.Struct('<QIqI')
@@ -47,6 +48,8 @@ counts = Counter()
 errors = []
 rng = random.Random(args.seed)
 next_id = time.time_ns()
+# Request numbers must increase in one session, also after this client starts again.
+request_number = time.time_ns()
 
 
 def frame(kind, body):
@@ -95,7 +98,7 @@ def read_reports(sock):
                     elif order_id in live:
                         live[order_id]['quantity'] = leaves
                 elif kind >= 66:
-                    order_id, symbol = CANCEL.unpack_from(body)
+                    order_id, symbol = ORDER_KEY.unpack_from(body)
                     request = pending.pop(order_id, None)
                     if request is None:
                         raise ValueError(f'Unexpected terminal report {kind} for {order_id}')
@@ -129,16 +132,17 @@ def read_reports(sock):
 
 
 def next_request():
-    global next_id
+    global next_id, request_number
+    request_number += 1
     candidates = [key for key in live if key not in pending]
     roll = rng.randrange(100)
     if candidates and (len(live) + len(pending) >= MAX_LIVE or roll < 40):
         order_id = rng.choice(candidates)
         order = live[order_id]
         if len(live) + len(pending) >= MAX_LIVE or roll < 25:
-            return order_id, 3, CANCEL.pack(order_id, order['symbol']), dict(order)
+            return order_id, 3, CANCEL.pack(request_number, order_id, order['symbol']), dict(order)
         price = max(9975, min(10025, order['price'] + rng.randint(-3, 3)))
-        return order_id, 4, REPLACE.pack(order_id, order['symbol'], price, rng.randint(1, 100)), dict(order)
+        return order_id, 4, REPLACE.pack(request_number, order_id, order['symbol'], price, rng.randint(1, 100)), dict(order)
     if len(live) + len(pending) >= MAX_LIVE:
         return None
     next_id += 1
@@ -149,7 +153,7 @@ def next_request():
     order_type = 1 if rng.randrange(10) == 0 else 0
     quantity = rng.randint(1, 100)
     order = {'symbol': symbol, 'side': side, 'price': price, 'quantity': quantity}
-    return next_id, 2, NEW.pack(next_id, symbol, side, order_type, price, quantity), order
+    return next_id, 2, NEW.pack(request_number, next_id, symbol, side, order_type, price, quantity), order
 
 
 with socket.create_connection(('127.0.0.1', args.port), timeout=5) as sock:
