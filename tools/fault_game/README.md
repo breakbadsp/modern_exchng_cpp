@@ -53,7 +53,8 @@ including reports that cannot be recovered after a disconnect. Equal state
 digests check agreement; they do not prove that all possible faults are safe.
 
 Stop the server with Ctrl+C, `kill -INT`, or `kill -TERM`, also when it runs as a
-background job. All child processes stop. Logs and storage stay
+background job. All child processes stop. They also stop when the server gets
+`SIGHUP` or `SIGKILL`. Logs and storage stay
 in the temporary directory printed at startup. One game uses approximately
 540 MB there. Delete that directory after inspection; if the temporary file
 system is full, the replicas cannot start and the server stops with the
