@@ -18,7 +18,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # C++26 contracts require GCC 16 with -fcontracts.
-    container: gcc:16.2.0-trixie
+    container:
+      image: gcc:16.2.0-trixie
+      # The default Docker seccomp profile refuses io_uring_setup.
+      options: --security-opt seccomp=unconfined
     strategy:
       fail-fast: false
       matrix:
