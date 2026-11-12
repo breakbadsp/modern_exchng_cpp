@@ -37,7 +37,7 @@ else above matching lives in the Engine.
 | Gateway (sockets, sessions, framing, routing, writes) | Done — `src/gateway.hpp` |
 | `main` + load-generator client | Done — `src/main.cpp`, `tools/loadgen.cpp` |
 | Replication preparation (request and op numbers, `Engine::Apply`, state digest) | Done — `src/engine.hpp` |
-| Replication (VSR replicas, log, view change, journal) | Not started; out of scope here |
+| Replication (VSR replicas, log, view change, journal) | Done with libvsr — `src/replication.hpp`, [docs/replication.md](../docs/replication.md) |
 
 `Book` is the matching logic only. It does not own a thread, a queue,
 client identities, or outbound messages. The Engine is the thin layer that
@@ -350,10 +350,10 @@ Stated so each one is a decision, not an accident:
 - **Cancel-on-disconnect.** Orders stay resting when a session drops.
   Adding it needs a per-session intrusive list of order slots in each
   engine.
-- **Journal / recovery.** A crash loses the book.
+- **Journal / recovery.** One process without replication loses the book
+  in a crash. A replicated cluster keeps it (`docs/replication.md`).
 - **Resend / replay** of exchange → client frames after reconnect.
-- **Replication.** "Replication preparation" lists what is installed and
-  what each missing part needs.
+- **Replication.** Done with libvsr; see `docs/replication.md`.
 - **Market data feed.** Would be an extra outbound queue per engine.
 - **FIX**, **TLS**, **multiple gateways**, **kernel bypass**. Transport is
   kernel TCP with non-blocking sockets and level-triggered epoll.
@@ -453,13 +453,12 @@ command.
 
 ### Still out of scope, and what each needs
 
-- **Snapshot and restore.** A serial form of exactly the state that the
-  digest covers, written at an op boundary. `Book` needs a restore
-  operation that puts an order into a given slot and sets the free-slot
-  order; today only `Rest` assigns slots. The index can be built again
-  from the orders. After a restore the digest must equal the digest stored
-  with the snapshot. With several engines, a snapshot of the exchange
-  needs all engines stopped at one op number.
+- **Snapshot and restore: done.** `src/engine.hpp` and `src/engine.cpp`
+  provide `SnapshotBytesMax`, `Snapshot`, and `Restore`. `Book::Restore`
+  in `src/book.hpp` and `src/book.cpp` restores slots and free-slot order.
+  The engine builds the client-order index again. Tests are in
+  `tests/engine_test.cpp`. With several engines, stop all engines at one
+  op number before you take an exchange snapshot.
 - **Resend of reports after reconnect.** A report sequence that belongs to
   the session and continues across logons, a fixed store of sent reports
   for each session, and a client message that asks for the reports from a
@@ -467,12 +466,9 @@ command.
   it in the order in which it drains the engines, which depends on thread
   timing when a session trades on more than one engine. A replicated
   sequence must come from the engines.
-- **Report sink for backups.** A backup applies the same commands and
-  discards the reports. Today `Emit` pushes to the outbound queue and
-  spins while it is full, so an engine without a gateway that drains
-  stops. The engine needs a sink that it selects at construction and can
-  switch at promotion (queue or discard), without a virtual call on each
-  report.
+- **Report sink for backups: done.** `Engine::SetReportsEnabled(false)`
+  makes `Apply` change state and push no report. Each replica pushes the
+  reports of live operations to its own gateway (`docs/replication.md`).
 
 ## Still open
 

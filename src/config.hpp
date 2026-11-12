@@ -51,12 +51,24 @@ struct GatewayConfig
   std::uint32_t outbound_queue_capacity_ = 0; // power of two
 };
 
+// One copy of the exchange in a replicated cluster (docs/replication.md).
+// The index in Config::replicas_ is the replica number.
+struct ReplicaConfig
+{
+  std::string replication_address_{}; // "a.b.c.d:port" for the other replicas
+  std::uint16_t gateway_port_ = 0;    // the client port of this replica
+};
+
+// libvsr supports clusters up to this size.
+constexpr std::size_t kMaxReplicas = 7;
+
 struct Config
 {
   std::vector<EngineConfig> engines_{};
   std::vector<SymbolConfig> symbols_{};
   std::vector<SessionConfig> sessions_{};
   GatewayConfig gateway_{};
+  std::vector<ReplicaConfig> replicas_{}; // empty: one exchange, no replication
 };
 
 struct ConfigError

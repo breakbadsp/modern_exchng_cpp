@@ -867,6 +867,169 @@ TEST(EngineDeterminismTest, TwoEnginesGiveEqualReportsAndDigestsForOneCommandSeq
                                        Reason::MarketRemainder, Reason::DuplicateRequest}));
 }
 
+// Captures the exact live bytes so comparisons also check canonical serialization.
+std::vector<std::byte> SnapshotOf(const Engine &p_engine)
+{
+  std::vector<std::byte> bytes(p_engine.SnapshotBytesMax());
+  const auto size = p_engine.Snapshot(bytes);
+  EXPECT_TRUE(size.has_value());
+  bytes.resize(size.value_or(0));
+  return bytes;
+}
+
+// Checks restore at several op boundaries and compares every later report and digest.
+TEST(EngineSnapshotTest, GeneratedCommandsContinueAfterRestore)
+{
+  const auto commands = GeneratedCommands(0x1234cafef00dULL, 3000);
+  for (const std::size_t boundary : {0U, 1U, 37U, 500U, 1999U})
+  {
+    Harness a{12, 4};
+    for (std::size_t i = 0; i < boundary; ++i)
+    {
+      static_cast<void>(a.ApplyNumbered(commands[i]));
+    }
+    Harness b{12, 4};
+    const auto snapshot = SnapshotOf(a.EngineRef());
+    ASSERT_TRUE(b.EngineRef().Restore(snapshot));
+    ASSERT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest());
+    ASSERT_EQ(b.EngineRef().LastAppliedOp(), a.EngineRef().LastAppliedOp());
+    ASSERT_EQ(SnapshotOf(b.EngineRef()), snapshot);
+    for (std::size_t i = boundary; i < commands.size(); ++i)
+    {
+      ASSERT_EQ(b.ApplyNumbered(commands[i]), a.ApplyNumbered(commands[i])) << i;
+      ASSERT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest()) << i;
+      ASSERT_EQ(b.EngineRef().LastAppliedOp(), a.EngineRef().LastAppliedOp());
+    }
+    EXPECT_EQ(SnapshotOf(b.EngineRef()), SnapshotOf(a.EngineRef()));
+    // Restore must also replace an occupied book and clear the old client index.
+    ASSERT_TRUE(b.EngineRef().Restore(snapshot));
+    Harness original{12, 4};
+    ASSERT_TRUE(original.EngineRef().Restore(snapshot));
+    EXPECT_EQ(b.EngineRef().StateDigest(), original.EngineRef().StateDigest());
+  }
+}
+
+// Changes one version-1 field. All fields have eight little-endian bytes.
+void SetSnapshotField(std::vector<std::byte> &p_bytes, std::size_t p_field, std::uint64_t p_value)
+{
+  for (std::size_t i = 0; i < 8; ++i)
+  {
+    p_bytes[p_field * 8 + i] = static_cast<std::byte>((p_value >> (i * 8U)) & 0xffU);
+  }
+}
+
+// Checks every truncation, trailing bytes, and configuration mismatches.
+TEST(EngineSnapshotTest, RejectsShortTrailingAndUnequalConfiguration)
+{
+  Harness a{4, 2};
+  a.Rest(Limit(kA, 1, Side::Buy, 100, 5));
+  const auto bytes = SnapshotOf(a.EngineRef());
+  Harness b{4, 2};
+  for (std::size_t size = 0; size < bytes.size(); ++size)
+  {
+    EXPECT_FALSE(b.EngineRef().Restore(std::span{bytes}.first(size))) << size;
+    std::vector<std::byte> short_output(size);
+    EXPECT_FALSE(a.EngineRef().Snapshot(short_output).has_value()) << size;
+  }
+  auto trailing = bytes;
+  trailing.push_back(std::byte{});
+  EXPECT_FALSE(b.EngineRef().Restore(trailing));
+  Harness other_orders{5, 2};
+  Harness other_levels{4, 3};
+  EXPECT_FALSE(other_orders.EngineRef().Restore(bytes));
+  EXPECT_FALSE(other_levels.EngineRef().Restore(bytes));
+  // The header contains version, book count, session count, then book configurations.
+  for (const std::size_t field : {0U, 1U, 2U, 3U, 4U, 5U, 6U})
+  {
+    auto corrupt = bytes;
+    SetSnapshotField(corrupt, field, 999);
+    EXPECT_FALSE(b.EngineRef().Restore(corrupt)) << field;
+  }
+  EXPECT_TRUE(b.EngineRef().Restore(bytes));
+  EXPECT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest());
+}
+
+// Checks individual invalid slots, keys, quantities, owners, and counts.
+TEST(EngineSnapshotTest, RejectsCorruptStateFields)
+{
+  Harness a{4, 2};
+  a.Rest(Limit(kA, 1, Side::Buy, 100, 5)); // slot 3
+  a.Rest(Limit(kA, 2, Side::Buy, 100, 6)); // slot 2
+  const auto bytes = SnapshotOf(a.EngineRef());
+  // Header is 14 fields. Bid level: count, price, order count, then two orders.
+  const std::array<std::pair<std::size_t, std::uint64_t>, 17> corruptions{{{14, 3},
+                                                                           {16, 0},
+                                                                           {16, 5},
+                                                                           {17, 4},
+                                                                           {22, 3},
+                                                                           {18, 0},
+                                                                           {18, 0x100000000ULL},
+                                                                           {19, kSessionCount},
+                                                                           {25, 1},
+                                                                           {21, 0xffffffffULL},
+                                                                           {27, 3},
+                                                                           {28, 0x100000000ULL},
+                                                                           {32, 1},
+                                                                           {32, 5},
+                                                                           {33, 4},
+                                                                           {33, 3},
+                                                                           {34, 0}}};
+  for (const auto &[field, value] : corruptions)
+  {
+    Harness b{4, 2};
+    auto corrupt = bytes;
+    SetSnapshotField(corrupt, field, value);
+    EXPECT_FALSE(b.EngineRef().Restore(corrupt)) << field;
+    ASSERT_TRUE(b.EngineRef().Restore(bytes));
+    EXPECT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest());
+  }
+}
+
+// Checks strict ladder order for both sides and rejects crossed books.
+TEST(EngineSnapshotTest, RejectsInvalidLadderPrices)
+{
+  for (const Side side : {Side::Buy, Side::Sell})
+  {
+    Harness a{4, 2};
+    a.Rest(Limit(kA, 1, side, 99, 5));
+    a.Rest(Limit(kA, 2, side, 100, 6));
+    auto bytes = SnapshotOf(a.EngineRef());
+    // The empty bid count precedes the asks for a sell-only book.
+    const std::size_t first_price = side == Side::Buy ? 15 : 16;
+    SetSnapshotField(bytes, first_price + 7, side == Side::Buy ? 99 : 100);
+    Harness b{4, 2};
+    EXPECT_FALSE(b.EngineRef().Restore(bytes));
+  }
+  Harness a{4, 2};
+  a.Rest(Limit(kA, 1, Side::Buy, 99, 5));
+  a.Rest(Limit(kA, 2, Side::Sell, 100, 6));
+  auto bytes = SnapshotOf(a.EngineRef());
+  SetSnapshotField(bytes, 23, 99); // Ask price equals the best bid.
+  Harness b{4, 2};
+  EXPECT_FALSE(b.EngineRef().Restore(bytes));
+}
+
+// Checks that live records increase size and that discard mode preserves state.
+TEST(EngineSnapshotTest, ReportsCanBeDisabledAndEnabled)
+{
+  Harness a;
+  Harness b;
+  const auto empty_size = SnapshotOf(a.EngineRef()).size();
+  const auto initial_digest = b.EngineRef().StateDigest();
+  b.EngineRef().SetReportsEnabled(false);
+  const Command rest = Numbered(Limit(kA, 1, Side::Sell, 100, 5), OpNumber{1}, RequestNumber{1});
+  EXPECT_FALSE(a.ApplyNumbered(rest).empty());
+  b.EngineRef().Apply(rest);
+  EXPECT_FALSE(b.Outbound().TryPop().has_value());
+  EXPECT_NE(b.EngineRef().StateDigest(), initial_digest);
+  EXPECT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest());
+  EXPECT_GT(SnapshotOf(a.EngineRef()).size(), empty_size);
+  b.EngineRef().SetReportsEnabled(true);
+  const Command take = Numbered(Market(kB, 9, Side::Buy, 3), OpNumber{2}, RequestNumber{2});
+  EXPECT_EQ(a.ApplyNumbered(take), b.ApplyNumbered(take));
+  EXPECT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest());
+}
+
 // Checks that another generated sequence of the same length ends with another digest.
 TEST(EngineDeterminismTest, DifferentCommandSequenceGivesADifferentDigest)
 {
