@@ -21,7 +21,7 @@ import time
 LEVELS = (1, 64, 1024)
 LATENCY_CYCLES = 200000
 MAX_CYCLES = 100000000  # bench_client batch limit
-BOOK_WORKLOADS = 5
+BOOK_WORKLOADS = 6
 STAT_EVENTS = 'cycles:u,instructions:u,branches:u,branch-misses:u'
 
 root = Path(__file__).resolve().parents[1]

@@ -11,6 +11,7 @@
 #include <ostream>
 #include <set>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -76,6 +77,7 @@ using mex::SpscQueue;
 using mex::wire::ClientOrderId;
 using mex::wire::ExchangeOrderId;
 using mex::wire::Liquidity;
+using mex::wire::MsgType;
 using mex::wire::Reason;
 using mex::wire::RequestNumber;
 
@@ -240,31 +242,32 @@ Command Limit(SessionId p_session, ClientOrderId p_id, Side p_side, std::int64_t
                                         .qty_ = Quantity{p_qty}}};
 }
 
-Command Market(SessionId p_session, ClientOrderId p_id, Side p_side, std::uint32_t p_qty)
+Command Market(SessionId p_session, ClientOrderId p_id, Side p_side, std::uint32_t p_qty,
+               std::uint32_t p_slot = 0)
 {
   return {.session_id_ = p_session,
-          .symbol_slot_ = 0,
+          .symbol_slot_ = p_slot,
           .order_ = mex::wire::NewOrder{.client_order_id_ = p_id,
-                                        .symbol_id_ = kSymbols[0],
+                                        .symbol_id_ = kSymbols[p_slot],
                                         .side_ = p_side,
                                         .type_ = mex::wire::OrderType::Market,
                                         .qty_ = Quantity{p_qty}}};
 }
 
-Command CancelOf(SessionId p_session, ClientOrderId p_id)
+Command CancelOf(SessionId p_session, ClientOrderId p_id, std::uint32_t p_slot = 0)
 {
   return {.session_id_ = p_session,
-          .symbol_slot_ = 0,
-          .order_ = mex::wire::Cancel{.client_order_id_ = p_id, .symbol_id_ = kSymbols[0]}};
+          .symbol_slot_ = p_slot,
+          .order_ = mex::wire::Cancel{.client_order_id_ = p_id, .symbol_id_ = kSymbols[p_slot]}};
 }
 
 Command ReplaceOf(SessionId p_session, ClientOrderId p_id, std::int64_t p_price,
-                  std::uint32_t p_total)
+                  std::uint32_t p_total, std::uint32_t p_slot = 0)
 {
   return {.session_id_ = p_session,
-          .symbol_slot_ = 0,
+          .symbol_slot_ = p_slot,
           .order_ = mex::wire::Replace{.client_order_id_ = p_id,
-                                       .symbol_id_ = kSymbols[0],
+                                       .symbol_id_ = kSymbols[p_slot],
                                        .new_price_ = Price{p_price},
                                        .new_total_qty_ = Quantity{p_total}}};
 }
@@ -1101,6 +1104,265 @@ TEST(EngineDigestTest, DependsOnTheClientTableAndTheLastAppliedOp)
   ASSERT_EQ(request_5.SendAs(5, Limit(kA, 1, Side::Sell, 100, 10)),
             (Reports{RejectR(kA, 1, Reason::DuplicateRequest)}));
   EXPECT_NE(request_5.EngineRef().StateDigest(), before);
+}
+
+// ---------------------------------------------------------------------------
+// Order lifecycle over random commands
+
+enum class CommandKind : std::uint8_t
+{
+  NewOrder = 0,
+  Cancel,
+  Replace,
+};
+
+// One order as its owner names it. Each book has its own ids.
+struct OrderKey
+{
+  std::uint32_t slot_ = 0;
+  SessionId session_ = 0;
+  ClientOrderId id_ = 0;
+
+  auto operator<=>(const OrderKey &) const = default;
+};
+
+// What the reports say about an order that rests.
+struct RestingOrder
+{
+  Price price_{};
+  Quantity leaves_{};
+};
+
+// How one command ends for its order: the final report, and whether the order
+// rests after it.
+struct Outcome
+{
+  MsgType type_ = MsgType::Ack;
+  std::optional<Reason> reason_{};
+  bool rests_ = false;
+
+  auto operator<=>(const Outcome &) const = default;
+};
+
+// The order lifecycle of prep/io-design-spec.md as data: every way a command
+// can end, by whether its order rests before the command. Zero quantity is
+// not here, because the test sends none.
+std::vector<Outcome> OutcomesOf(CommandKind p_kind, bool p_resting)
+{
+  switch (p_kind)
+  {
+  case CommandKind::NewOrder:
+    if (p_resting)
+    {
+      return {{MsgType::Reject, Reason::DuplicateClientOrderId, true}};
+    }
+    return {{MsgType::Ack, std::nullopt, true},         // rests, whole or after fills
+            {MsgType::Ack, std::nullopt, false},        // fully filled
+            {MsgType::Reject, Reason::BookFull, false}, // no fill and no room
+            {MsgType::Done, Reason::CannotRest, false}, // fills, then no room
+            {MsgType::Done, Reason::MarketRemainder, false}};
+  case CommandKind::Cancel:
+    if (p_resting)
+    {
+      return {{MsgType::CancelAck, std::nullopt, false}};
+    }
+    return {{MsgType::CancelReject, Reason::UnknownOrder, false}};
+  case CommandKind::Replace:
+    if (p_resting)
+    {
+      return {{MsgType::ReplaceAck, std::nullopt, true},  // reduced in place, or moved
+              {MsgType::ReplaceAck, std::nullopt, false}, // moved and fully filled
+              {MsgType::ReplaceReject, Reason::TooLate, true},
+              {MsgType::ReplaceReject, Reason::BookFull, true}};
+    }
+    return {{MsgType::ReplaceReject, Reason::UnknownOrder, false}};
+  }
+  return {};
+}
+
+OrderKey KeyOf(const Report &p_report)
+{
+  return std::visit(
+      [&p_report](const auto &p_message)
+      {
+        return OrderKey{.slot_ = p_message.symbol_id_ == kSymbols[0] ? 0U : 1U,
+                        .session_ = p_report.session_id_,
+                        .id_ = p_message.client_order_id_};
+      },
+      p_report.report_);
+}
+
+MsgType TypeOf(const Report &p_report)
+{
+  return std::visit([](const auto &p_message) { return p_message.kType; }, p_report.report_);
+}
+
+// The reason code of a report that has one.
+std::optional<Reason> ReasonOf(const Report &p_report)
+{
+  return std::visit(
+      [](const auto &p_message) -> std::optional<Reason>
+      {
+        if constexpr (requires { p_message.reason_; })
+        {
+          return p_message.reason_;
+        }
+        else
+        {
+          return std::nullopt;
+        }
+      },
+      p_report.report_);
+}
+
+// Checks the order lifecycle over many random commands on two small books.
+// The test knows each order only from its reports, as a client does, and never
+// reads engine state. Each command must end in a row of OutcomesOf for the
+// state of its order. Each maker fill must name an order that rests, and must
+// leave what the reports said minus the fill. A defect in the upkeep of the
+// index or of the book then shows as a wrong reject, a fill of an ended order,
+// or a broken contract in a later command.
+TEST(EngineTest, OrderLifecycleHoldsOverManyRandomCommands)
+{
+  Harness h{6, 3};
+  std::map<OrderKey, RestingOrder> resting;
+  std::map<std::tuple<CommandKind, bool, Outcome>, std::uint32_t> seen;
+  std::uint32_t reduced_in_place = 0;
+  std::uint32_t moved = 0;
+  std::uint32_t makers_partly_filled = 0;
+  std::uint32_t makers_filled = 0;
+  std::uint64_t random = 0x9e3779b97f4a7c15ULL;
+  const auto below = [&random](std::uint32_t p_bound)
+  {
+    random ^= random << 13U;
+    random ^= random >> 7U;
+    random ^= random << 17U;
+    return static_cast<std::uint32_t>(random % p_bound);
+  };
+
+  for (std::uint32_t op = 0; op < 40000; ++op)
+  {
+    // Few ids and prices, so that ids are used again and orders cross often.
+    const OrderKey key{.slot_ = below(2), .session_ = below(2) == 0 ? kA : kB, .id_ = 1 + below(6)};
+    const Side side = below(2) == 0 ? Side::Buy : Side::Sell;
+    const std::int64_t price = 98 + below(5);
+    // Half of the commands are NewOrder (one in ten of them a market order), a
+    // quarter Cancel, and a quarter Replace.
+    const std::uint32_t roll = below(100);
+    const CommandKind kind = roll < 50   ? CommandKind::NewOrder
+                             : roll < 75 ? CommandKind::Cancel
+                                         : CommandKind::Replace;
+    Command command{};
+    switch (kind)
+    {
+    case CommandKind::NewOrder:
+      command = roll < 5 ? Market(key.session_, key.id_, side, 1 + below(5), key.slot_)
+                         : Limit(key.session_, key.id_, side, price, 1 + below(5), key.slot_);
+      break;
+    case CommandKind::Cancel:
+      command = CancelOf(key.session_, key.id_, key.slot_);
+      break;
+    case CommandKind::Replace:
+      command = ReplaceOf(key.session_, key.id_, price, 1 + below(8), key.slot_);
+      break;
+    }
+    const auto found = resting.find(key);
+    const bool was_resting = found != resting.end();
+    const RestingOrder before = was_resting ? found->second : RestingOrder{};
+
+    const Reports reports = h.Send(command);
+
+    ASSERT_FALSE(reports.empty()) << "op " << op;
+    for (std::size_t i = 0; i + 1 < reports.size(); ++i)
+    {
+      const auto *fill = std::get_if<mex::wire::Fill>(&reports[i].report_);
+      ASSERT_NE(fill, nullptr) << "op " << op << ": only fills come before the final report";
+      const OrderKey fill_key = KeyOf(reports[i]);
+      if (fill->liquidity_ == Liquidity::Taker)
+      {
+        ASSERT_EQ(fill_key, key) << "op " << op;
+        continue;
+      }
+      ASSERT_NE(fill_key, key) << "op " << op << ": an order filled itself";
+      const auto maker = resting.find(fill_key);
+      ASSERT_TRUE(maker != resting.end()) << "op " << op << ": a fill of an order that ended";
+      ASSERT_EQ(fill->qty_ + fill->leaves_, maker->second.leaves_) << "op " << op;
+      if (fill->leaves_ == Quantity{})
+      {
+        resting.erase(maker);
+        ++makers_filled;
+      }
+      else
+      {
+        maker->second.leaves_ = fill->leaves_;
+        ++makers_partly_filled;
+      }
+    }
+
+    const Report &last = reports.back();
+    const MsgType type = TypeOf(last);
+    ASSERT_EQ(KeyOf(last), key) << "op " << op;
+    // A reject and the answer to a Cancel come alone. Fills come only before
+    // an Ack, a ReplaceAck, or a Done.
+    if (type != MsgType::Ack && type != MsgType::ReplaceAck && type != MsgType::Done)
+    {
+      ASSERT_EQ(reports.size(), 1U) << "op " << op;
+    }
+    if (const auto *ack = std::get_if<mex::wire::Ack>(&last.report_))
+    {
+      if (ack->leaves_ > Quantity{})
+      {
+        resting[key] = RestingOrder{Price{price}, ack->leaves_};
+      }
+    }
+    else if (const auto *replace_ack = std::get_if<mex::wire::ReplaceAck>(&last.report_))
+    {
+      ASSERT_EQ(replace_ack->price_, Price{price}) << "op " << op;
+      if (replace_ack->leaves_ > Quantity{})
+      {
+        // The same price with fewer leaves is the only replace that keeps its place.
+        const bool in_place = reports.size() == 1 && before.price_ == replace_ack->price_ &&
+                              replace_ack->leaves_ < before.leaves_;
+        ++(in_place ? reduced_in_place : moved);
+        resting[key] = RestingOrder{replace_ack->price_, replace_ack->leaves_};
+      }
+      else
+      {
+        resting.erase(key);
+      }
+    }
+    else if (type == MsgType::CancelAck)
+    {
+      resting.erase(key);
+    }
+
+    const Outcome outcome{
+        .type_ = type, .reason_ = ReasonOf(last), .rests_ = resting.contains(key)};
+    const std::vector<Outcome> allowed = OutcomesOf(kind, was_resting);
+    ASSERT_TRUE(std::ranges::find(allowed, outcome) != allowed.end())
+        << "op " << op << ": " << testing::PrintToString(last) << " is not an end of command kind "
+        << static_cast<int>(kind) << " for an order with resting = " << was_resting;
+    ++seen[{kind, was_resting, outcome}];
+  }
+
+  // The run must meet every row of the lifecycle, or it proves less than it says.
+  for (const CommandKind kind : {CommandKind::NewOrder, CommandKind::Cancel, CommandKind::Replace})
+  {
+    for (const bool was_resting : {false, true})
+    {
+      for (const Outcome &outcome : OutcomesOf(kind, was_resting))
+      {
+        const std::uint32_t count = seen[{kind, was_resting, outcome}];
+        EXPECT_GT(count, 0U) << "kind " << static_cast<int>(kind) << " resting " << was_resting
+                             << " type " << static_cast<int>(outcome.type_) << " rests "
+                             << outcome.rests_;
+      }
+    }
+  }
+  EXPECT_GT(reduced_in_place, 0U);
+  EXPECT_GT(moved, 0U);
+  EXPECT_GT(makers_partly_filled, 0U);
+  EXPECT_GT(makers_filled, 0U);
 }
 
 TEST(EngineTest, FullOutboundQueueStallsUntilTheGatewayDrainsIt)

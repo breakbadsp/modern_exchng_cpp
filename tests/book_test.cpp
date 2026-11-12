@@ -893,4 +893,108 @@ TEST(Restore, PreservesSlotsPriorityAndFreeStack)
   ExpectBookInvariants(book);
 }
 
+// Moving an order preserves its peers and the sorted ladders on either side.
+TEST(Replace, MovesAcrossLevelsOnBothSides)
+{
+  for (const mex::Side side : {mex::Side::Buy, mex::Side::Sell})
+  {
+    for (const std::int64_t old_price : {90, 100, 110})
+    {
+      for (const std::int64_t new_price : {80, 90, 95, 100, 105, 110, 120})
+      {
+        for (const bool shared_level : {false, true})
+        {
+          SCOPED_TRACE(::testing::Message() << static_cast<int>(side) << ' ' << old_price << ' '
+                                            << new_price << ' ' << shared_level);
+          mex::Book book(8, 4);
+          FillLog log;
+          for (const std::int64_t price : {90, 100, 110})
+          {
+            if (price != old_price || shared_level)
+            {
+              ExpectResting(SubmitLimit(book, log, side, price, 5), 5);
+            }
+          }
+          const mex::SubmitResult moving = SubmitLimit(book, log, side, old_price, 3);
+          const std::uint32_t free_slots = book.FreeSlotCount();
+
+          const mex::SubmitResult result =
+              book.ReplaceOrder(moving.order_id_, mex::Price{new_price}, mex::Quantity{7});
+
+          ExpectResting(result, 7);
+          EXPECT_EQ(book.Order(result.order_id_).price_, mex::Price{new_price});
+          EXPECT_EQ(book.Order(result.order_id_).side_, side);
+          EXPECT_EQ(book.FreeSlotCount(), free_slots);
+          EXPECT_TRUE(book.Fills().empty());
+          for (mex::OrderId id = 0; id < book.MaxOrders(); ++id)
+          {
+            if (id != result.order_id_ && book.Order(id).quantity_ > mex::Quantity{})
+            {
+              EXPECT_EQ(book.Order(id).quantity_, mex::Quantity{5});
+            }
+          }
+          ExpectBookInvariants(book);
+        }
+      }
+    }
+  }
+}
+
+// A full ladder can accept a move to an existing level and keeps that level's FIFO order.
+TEST(Replace, FullLadderAcceptsExistingPriceOnBothSides)
+{
+  for (const mex::Side side : {mex::Side::Buy, mex::Side::Sell})
+  {
+    mex::Book book(3, 2);
+    FillLog log;
+    const mex::SubmitResult moving = SubmitLimit(book, log, side, 90, 3);
+    const mex::SubmitResult peer = SubmitLimit(book, log, side, 90, 4);
+    const mex::SubmitResult destination = SubmitLimit(book, log, side, 100, 5);
+
+    const mex::SubmitResult result =
+        book.ReplaceOrder(moving.order_id_, mex::Price{100}, mex::Quantity{7});
+
+    ExpectResting(result, 7);
+    EXPECT_EQ(book.FreeSlotCount(), 0u);
+    ExpectBookInvariants(book);
+    const bool buy = side == mex::Side::Buy;
+    const mex::Side opposite = buy ? mex::Side::Sell : mex::Side::Buy;
+    const std::uint32_t quantity = buy ? 6U : 10U;
+    ExpectTrade(SubmitMarket(book, log, opposite, quantity), quantity, 0, false);
+    ASSERT_EQ(log.Records().size(), buy ? 2U : 3U);
+    if (!buy)
+    {
+      ExpectFill(log.Records()[0], peer.order_id_, 90, 4);
+    }
+    ExpectFill(log.Records()[buy ? 0U : 1U], destination.order_id_, 100, 5);
+    ExpectFill(log.Records().back(), result.order_id_, 100, 1);
+    ExpectBookInvariants(book);
+  }
+}
+
+// Capacity rejection happens before matching, so both sides keep their orders.
+TEST(Replace, FullLadderRejectsBeforeMatchingOnBothSides)
+{
+  for (const mex::Side side : {mex::Side::Buy, mex::Side::Sell})
+  {
+    mex::Book book(4, 2);
+    FillLog log;
+    const bool buy = side == mex::Side::Buy;
+    const mex::Side opposite = buy ? mex::Side::Sell : mex::Side::Buy;
+    const std::int64_t price = buy ? 120 : 80;
+    const mex::SubmitResult moving = SubmitLimit(book, log, side, 100, 3);
+    SubmitLimit(book, log, side, 100, 4);
+    SubmitLimit(book, log, side, buy ? 90 : 110, 5);
+    const mex::SubmitResult maker = SubmitLimit(book, log, opposite, price, 6);
+
+    ExpectRejected(book.ReplaceOrder(moving.order_id_, mex::Price{price}, mex::Quantity{7}), 7);
+
+    EXPECT_TRUE(book.Fills().empty());
+    EXPECT_EQ(book.Order(moving.order_id_).quantity_, mex::Quantity{3});
+    EXPECT_EQ(book.Order(maker.order_id_).quantity_, mex::Quantity{6});
+    EXPECT_EQ(book.FreeSlotCount(), 0u);
+    ExpectBookInvariants(book);
+  }
+}
+
 } // namespace

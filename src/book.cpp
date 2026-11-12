@@ -168,7 +168,6 @@ void AppendToLevel(OrderNode *p_pool, std::uint32_t p_pool_size, PriceLevel &p_l
   contract_assert(p_level.tail_ < p_pool_size);
   OrderNode &node = p_pool[p_order_id];
   node.prev_ = p_level.tail_;
-  node.next_ = kInvalidOrderId;
   p_pool[p_level.tail_].next_ = p_order_id;
   p_level.tail_ = p_order_id;
   contract_assert(p_quantity > Quantity{});
@@ -314,10 +313,15 @@ bool Book::CancelOrder(const OrderId p_order_id)
     return false;
   }
 
+  RemoveOrder(p_order_id, LevelIndex(p_order_id));
+  return true;
+}
+
+void Book::RemoveOrder(OrderId p_order_id, std::uint32_t p_level_index)
+{
   OrderNode &node = pool_[p_order_id];
   PriceLadder &levels = Levels(node.side_);
-  const std::uint32_t index = LevelIndex(p_order_id);
-  PriceLevel &level = levels[index];
+  PriceLevel &level = levels[p_level_index];
   contract_assert(level.total_qty_ >= node.quantity_.units_);
   UnlinkNode(pool_.get(), pool_size_, level, p_order_id);
   level.total_qty_ -= node.quantity_.units_;
@@ -329,9 +333,8 @@ bool Book::CancelOrder(const OrderId p_order_id)
     contract_assert(level.head_ == kInvalidOrderId);
     contract_assert(level.tail_ == kInvalidOrderId);
     contract_assert(level.total_qty_ == 0);
-    levels.Erase(index);
+    levels.Erase(p_level_index);
   }
-  return true;
 }
 
 bool Book::ReduceOrder(const OrderId p_order_id, const Quantity p_new_quantity)
@@ -358,18 +361,45 @@ SubmitResult Book::ReplaceOrder(const OrderId p_order_id, Price p_new_price,
                                 const Quantity p_new_quantity)
 {
   fill_count_ = 0;
-  // Check everything before the book changes, so a reject leaves the order as it was.
-  if (!IsResting(p_order_id) || !CanRestAfterRemoving(p_order_id, p_new_price))
+  if (!IsResting(p_order_id))
   {
     return Rejected(p_new_quantity);
   }
 
   const Side side = pool_[p_order_id].side_;
-  [[maybe_unused]] const bool cancelled = CancelOrder(p_order_id);
-  contract_assert(cancelled);
-  const SubmitResult result = SubmitLimitOrder(side, p_new_price, p_new_quantity);
-  contract_assert(result.status_ == SubmitStatus::Accepted);
-  return result;
+  PriceLadder &levels = Levels(side);
+  const std::uint32_t old_index = LevelIndex(p_order_id);
+  std::uint32_t index = pool_[p_order_id].price_ == p_new_price
+                            ? old_index
+                            : FindLevel(levels.begin(), static_cast<std::uint32_t>(levels.size()),
+                                        p_new_price, Ascending(side));
+  const bool removes_level = levels[old_index].order_count_ == 1;
+  const bool level_exists = index < levels.size() && levels[index].price_ == p_new_price;
+  // Reject before removing or matching, so capacity failure leaves both sides unchanged.
+  if (!level_exists && !removes_level && levels.size() >= max_price_levels_)
+  {
+    return Rejected(p_new_quantity);
+  }
+
+  RemoveOrder(p_order_id, old_index);
+  if (removes_level && old_index < index)
+  {
+    --index;
+  }
+  // Matching only changes the opposite ladder, so the adjusted index stays valid.
+  // As in SubmitLimitOrder, a price that does not cross skips the Match call.
+  const PriceLadder &makers = Levels(Opposite(side));
+  const bool crosses = !makers.empty() && Crosses(side, p_new_price, makers.back().price_);
+  const Quantity filled = crosses ? Match(side, &p_new_price, p_new_quantity) : Quantity{};
+  const Quantity remaining = p_new_quantity - filled;
+  if (remaining == Quantity{})
+  {
+    return Accepted(filled, Quantity{}, kInvalidOrderId);
+  }
+  // The removal freed a slot, and the check above kept room for the level.
+  const OrderId order_id = RestAtLevel(side, p_new_price, remaining, index);
+  contract_assert(order_id != kInvalidOrderId);
+  return Accepted(filled, remaining, order_id);
 }
 
 const OrderNode &Book::Order(OrderId p_order_id) const { return pool_[p_order_id]; }
@@ -510,29 +540,6 @@ Quantity Book::Match(Side p_aggressor, const Price *p_limit_price, Quantity p_qu
   return p_quantity - remaining;
 }
 
-// Exact, not conservative: matching only removes levels on the other side, so the
-// only change to this side before the rest is the removal of p_order_id itself.
-// The pool has room, because the removal frees a slot.
-bool Book::CanRestAfterRemoving(OrderId p_order_id, Price p_price) const
-{
-  const OrderNode &node = pool_[p_order_id];
-  if (node.price_ == p_price)
-  {
-    // Its level stays, or it goes and frees the room to come back.
-    return true;
-  }
-  const PriceLadder &levels = Levels(node.side_);
-  const std::uint32_t index = FindLevel(levels.begin(), static_cast<std::uint32_t>(levels.size()),
-                                        p_price, Ascending(node.side_));
-  if (index < levels.size() && levels[index].price_ == p_price)
-  {
-    return true;
-  }
-  const bool frees_own_level = levels[LevelIndex(p_order_id)].order_count_ == 1;
-  const std::size_t size_after = levels.size() - (frees_own_level ? 1 : 0);
-  return size_after < static_cast<std::size_t>(max_price_levels_);
-}
-
 bool Book::IsResting(OrderId p_order_id) const
 {
   return p_order_id < pool_size_ && pool_[p_order_id].quantity_ > Quantity{};
@@ -560,7 +567,13 @@ OrderId Book::Rest(Side p_side, Price p_price, Quantity p_quantity)
   PriceLadder &levels = Levels(p_side);
   const std::uint32_t index = FindLevel(levels.begin(), static_cast<std::uint32_t>(levels.size()),
                                         p_price, Ascending(p_side));
-  const bool level_exists = index < levels.size() && levels[index].price_ == p_price;
+  return RestAtLevel(p_side, p_price, p_quantity, index);
+}
+
+OrderId Book::RestAtLevel(Side p_side, Price p_price, Quantity p_quantity, std::uint32_t p_index)
+{
+  PriceLadder &levels = Levels(p_side);
+  const bool level_exists = p_index < levels.size() && levels[p_index].price_ == p_price;
   if (!level_exists && levels.size() >= static_cast<std::size_t>(max_price_levels_))
   {
     return kInvalidOrderId;
@@ -575,23 +588,23 @@ OrderId Book::Rest(Side p_side, Price p_price, Quantity p_quantity)
   node.price_ = p_price;
   node.quantity_ = p_quantity;
   node.side_ = p_side;
-  node.next_ = kInvalidOrderId;
+  // Construction and ReleaseSlot clear the links of a free slot.
+  contract_assert(node.prev_ == kInvalidOrderId && node.next_ == kInvalidOrderId);
 
   if (level_exists)
   {
-    AppendToLevel(pool_.get(), pool_size_, levels[index], order_id, p_quantity);
+    AppendToLevel(pool_.get(), pool_size_, levels[p_index], order_id, p_quantity);
     return order_id;
   }
 
   contract_assert(levels.size() < levels.Capacity());
-  node.prev_ = kInvalidOrderId;
   PriceLevel level;
   level.price_ = p_price;
   level.head_ = order_id;
   level.tail_ = order_id;
   level.order_count_ = 1;
   level.total_qty_ = p_quantity.units_;
-  levels.Insert(index, level);
+  levels.Insert(p_index, level);
   return order_id;
 }
 
