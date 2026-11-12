@@ -202,6 +202,28 @@ template <typename T>
   return {};
 }
 
+[[nodiscard]] Status ParseReplica(ParseState &p_state, Fields p_fields)
+{
+  const std::string_view address = p_fields[1];
+  const auto gateway_port = ParseInteger<std::uint16_t>("gateway_port", p_fields[2], 1);
+  if (!gateway_port)
+  {
+    return std::unexpected(gateway_port.error());
+  }
+  std::vector<ReplicaConfig> &replicas = p_state.config_.replicas_;
+  if (replicas.size() == kMaxReplicas)
+  {
+    return std::unexpected(std::format("more than {} replica records", kMaxReplicas));
+  }
+  if (std::ranges::find(replicas, address, &ReplicaConfig::replication_address_) != replicas.end())
+  {
+    return std::unexpected(std::format("duplicate replica address '{}'", address));
+  }
+  replicas.push_back(
+      ReplicaConfig{.replication_address_ = std::string{address}, .gateway_port_ = *gateway_port});
+  return {};
+}
+
 template <typename T>
 [[nodiscard]] Status SetOnce(std::optional<T> &p_slot, std::string_view p_key, T p_value)
 {
@@ -287,6 +309,7 @@ constexpr std::array kRecordKinds{
     RecordKind{.keyword_ = "symbol", .values_ = 6, .parse_ = &ParseSymbol},
     RecordKind{.keyword_ = "session", .values_ = 2, .parse_ = &ParseSession},
     RecordKind{.keyword_ = "gateway", .values_ = 2, .parse_ = &ParseGateway},
+    RecordKind{.keyword_ = "replica", .values_ = 2, .parse_ = &ParseReplica},
 };
 
 [[nodiscard]] Status ParseRecord(ParseState &p_state, Fields p_stored, std::size_t p_count)

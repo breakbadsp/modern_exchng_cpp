@@ -422,6 +422,84 @@ std::span<const OrderId> Book::FreeSlots() const
 
 std::uint32_t Book::MaxOrders() const { return pool_size_; }
 
+bool Book::Restore(std::span<const RestingOrder> p_orders, std::span<const OrderId> p_free_slots)
+{
+  if (p_orders.size() > pool_size_ || p_free_slots.size() != pool_size_ - p_orders.size())
+  {
+    return false;
+  }
+  for (OrderId slot = 0; slot < pool_size_; ++slot)
+  {
+    pool_[slot] = OrderNode{};
+  }
+  while (!bids_.empty())
+  {
+    bids_.PopBack();
+  }
+  while (!asks_.empty())
+  {
+    asks_.PopBack();
+  }
+  fill_count_ = 0;
+  free_count_ = 0;
+  bool saw_ask = false;
+  for (const RestingOrder &order : p_orders)
+  {
+    if (order.slot_ >= pool_size_ || order.quantity_ == Quantity{} ||
+        (order.side_ != Side::Buy && order.side_ != Side::Sell) ||
+        (saw_ask && order.side_ == Side::Buy))
+    {
+      return false;
+    }
+    OrderNode &node = pool_[order.slot_];
+    if (node.quantity_ != Quantity{})
+    {
+      return false;
+    }
+    saw_ask = order.side_ == Side::Sell;
+    PriceLadder &levels = Levels(order.side_);
+    if (!levels.empty() && (order.side_ == Side::Buy ? order.price_ < levels.back().price_
+                                                     : order.price_ > levels.back().price_))
+    {
+      return false;
+    }
+    node = OrderNode{.price_ = order.price_, .quantity_ = order.quantity_, .side_ = order.side_};
+    if (!levels.empty() && levels.back().price_ == order.price_)
+    {
+      AppendToLevel(pool_.get(), pool_size_, levels.back(), order.slot_, order.quantity_);
+    }
+    else
+    {
+      if (levels.size() == levels.Capacity())
+      {
+        return false;
+      }
+      levels.Insert(static_cast<std::uint32_t>(levels.size()),
+                    PriceLevel{order.price_, order.slot_, order.slot_, 1, order.quantity_.units_});
+    }
+  }
+  if (!bids_.empty() && !asks_.empty() && bids_.back().price_ >= asks_.back().price_)
+  {
+    return false;
+  }
+  for (const OrderId slot : p_free_slots)
+  {
+    if (slot >= pool_size_ || pool_[slot].quantity_ != Quantity{} ||
+        pool_[slot].prev_ != kInvalidOrderId)
+    {
+      return false;
+    }
+    // Mark free slots during validation to detect duplicate slots without allocation.
+    pool_[slot].prev_ = slot;
+    free_ids_[free_count_++] = slot;
+  }
+  for (const OrderId slot : p_free_slots)
+  {
+    pool_[slot].prev_ = kInvalidOrderId;
+  }
+  return true;
+}
+
 Quantity Book::Match(Side p_aggressor, const Price *p_limit_price, Quantity p_quantity)
 {
   contract_assert(p_quantity > Quantity{});

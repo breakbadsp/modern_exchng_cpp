@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
@@ -273,6 +274,45 @@ TEST(ConfigTest, RejectsAMissingGatewayKey)
                                      "gateway inbound_queue_capacity 1024\n"
                                      "gateway outbound_queue_capacity 1024\n";
   ExpectError(kText, 0, "missing gateway key 'port'");
+}
+
+TEST(ConfigTest, ParsesReplicaRecordsInOrder)
+{
+  const auto without = mex::ParseConfig(kValid);
+  ASSERT_TRUE(without.has_value());
+  EXPECT_TRUE(without->replicas_.empty());
+
+  const auto config =
+      mex::ParseConfig(ValidWith("replica 10.0.0.1:7000 9001\nreplica 10.0.0.2:7000 9002"));
+  ASSERT_TRUE(config.has_value());
+  ASSERT_EQ(config->replicas_.size(), 2U);
+  EXPECT_EQ(config->replicas_[0].replication_address_, "10.0.0.1:7000");
+  EXPECT_EQ(config->replicas_[0].gateway_port_, 9001);
+  EXPECT_EQ(config->replicas_[1].replication_address_, "10.0.0.2:7000");
+  EXPECT_EQ(config->replicas_[1].gateway_port_, 9002);
+}
+
+TEST(ConfigTest, RejectsADuplicateReplicaAddress)
+{
+  ExpectError(ValidWith("replica 10.0.0.1:7000 9001\nreplica 10.0.0.1:7000 9002"), 10,
+              "duplicate replica address '10.0.0.1:7000'");
+}
+
+TEST(ConfigTest, RejectsAReplicaGatewayPortOfZero)
+{
+  const auto config = mex::ParseConfig(ValidWith("replica 10.0.0.1:7000 0"));
+  ASSERT_FALSE(config.has_value());
+  EXPECT_EQ(config.error().line_, 9U);
+}
+
+TEST(ConfigTest, RejectsMoreReplicasThanTheLibrarySupports)
+{
+  std::string text{kValid};
+  for (std::size_t replica = 0; replica <= mex::kMaxReplicas; ++replica)
+  {
+    text += std::format("replica 10.0.0.{}:7000 9000\n", replica + 1);
+  }
+  ExpectError(text, 9 + mex::kMaxReplicas, "more than 7 replica records");
 }
 
 TEST(ConfigTest, RejectsAnEmptyFile) { ExpectError("", 0, "no engine records"); }

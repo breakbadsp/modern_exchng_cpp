@@ -11,6 +11,14 @@ Single-symbol limit order book with price-time (FIFO) matching. One `mex::Book` 
 
 Design background and locked decisions: [`prep/design-spec.md`](prep/design-spec.md). Gateway, queues, and engine threads: [`prep/io-design-spec.md`](prep/io-design-spec.md). C++ style: [`docs/cpp-coding-standards.md`](docs/cpp-coding-standards.md) (2-space indent, Allman braces; enforced by [`.clang-format`](.clang-format)).
 
+## Replication
+
+Several copies of the exchange can run as one cluster that survives the
+failure of a minority of them. [libvsr](https://github.com/breakbadsp/libvsr)
+replicates the orders with Viewstamped Replication. See
+[`docs/replication.md`](docs/replication.md). CMake gets libvsr at configure
+time; pass `-DMEX_LIBVSR_SOURCE_DIR=<path>` to use a local checkout.
+
 ## Requirements
 
 - C++26 compiler: **GCC 16+** with working `-fcontracts` (configure fails otherwise). Clang is rejected.

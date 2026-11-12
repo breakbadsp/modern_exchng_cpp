@@ -74,7 +74,25 @@ if(MEX_SANITIZER_LIST)
     add_link_options(-fsanitize=${MEX_SANITIZER_CSV})
 endif()
 
-add_library(mex STATIC src/book.cpp src/config.cpp src/engine.cpp src/gateway.cpp)
+# libvsr does the replication (docs/replication.md). Set MEX_LIBVSR_SOURCE_DIR
+# to build with a local checkout; otherwise CMake gets the pinned commit.
+set(MEX_LIBVSR_SOURCE_DIR "" CACHE PATH "A local libvsr checkout to use")
+set(VSR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(VSR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+if(MEX_LIBVSR_SOURCE_DIR)
+    add_subdirectory(${MEX_LIBVSR_SOURCE_DIR} ${CMAKE_BINARY_DIR}/libvsr EXCLUDE_FROM_ALL)
+else()
+    include(FetchContent)
+    FetchContent_Declare(libvsr
+        GIT_REPOSITORY https://github.com/breakbadsp/libvsr.git
+        GIT_TAG 0a2a771083a92d46035df17d0ee6a0bd62fe8bd5
+        EXCLUDE_FROM_ALL)
+    FetchContent_MakeAvailable(libvsr)
+endif()
+
+add_library(mex STATIC src/book.cpp src/config.cpp src/engine.cpp src/gateway.cpp
+    src/replication.cpp src/replicated_exchange.cpp)
+target_link_libraries(mex PUBLIC vsr_io)
 target_include_directories(mex PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
@@ -112,6 +130,10 @@ target_compile_definitions(test_config PRIVATE
     MEX_EXAMPLE_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/config/example.cfg")
 target_compile_options(test_config PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
 
+add_executable(test_replication tests/replication_test.cpp)
+target_link_libraries(test_replication PRIVATE mex GTest::gtest_main)
+target_compile_options(test_replication PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+
 add_executable(test_gateway tests/gateway_test.cpp)
 target_link_libraries(test_gateway PRIVATE mex GTest::gtest_main Threads::Threads)
 target_compile_options(test_gateway PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
@@ -135,9 +157,9 @@ target_compile_options(bench_client PRIVATE -O3 -g -DNDEBUG -fno-omit-frame-poin
 # -O3 like bench_book. The exchange compiles the sources itself, because mex is
 # built with the preset's flags. Contracts stay on in the exchange.
 add_executable(mex_exchange src/main.cpp src/book.cpp src/config.cpp src/engine.cpp
-    src/gateway.cpp)
+    src/gateway.cpp src/replication.cpp src/replicated_exchange.cpp)
 target_include_directories(mex_exchange PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mex_exchange PRIVATE Threads::Threads)
+target_link_libraries(mex_exchange PRIVATE vsr_io Threads::Threads)
 target_compile_options(mex_exchange PRIVATE -O3 -DNDEBUG
     -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
 
@@ -152,6 +174,7 @@ add_test(NAME test_spsc_queue COMMAND test_spsc_queue)
 add_test(NAME test_protocol COMMAND test_protocol)
 add_test(NAME test_engine COMMAND test_engine)
 add_test(NAME test_config COMMAND test_config)
+add_test(NAME test_replication COMMAND test_replication)
 add_test(NAME test_gateway COMMAND test_gateway)
 # Loopback sockets: a lost frame must fail the run, not hang it.
 set_tests_properties(test_gateway PROPERTIES TIMEOUT 120)
@@ -161,6 +184,13 @@ add_test(NAME exchange_smoke
         ${CMAKE_CURRENT_SOURCE_DIR}/config/example.cfg
         ${CMAKE_CURRENT_BINARY_DIR}/exchange_smoke)
 set_tests_properties(exchange_smoke PROPERTIES TIMEOUT 60)
+# Three replicas on loopback: failover, restart, and equal state.
+add_test(NAME replicated_smoke
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/replicated_smoke_test.sh
+        $<TARGET_FILE:mex_exchange> $<TARGET_FILE:mex_loadgen>
+        ${CMAKE_CURRENT_SOURCE_DIR}/config/example.cfg
+        ${CMAKE_CURRENT_BINARY_DIR}/replicated_smoke)
+set_tests_properties(replicated_smoke PROPERTIES TIMEOUT 180)
 # The flow checks its fill totals and final book state; contracts are off here.
 add_test(NAME bench_client_smoke COMMAND bench_client batch 1000 64)
 
@@ -175,6 +205,11 @@ if(CLANG_FORMAT_EXECUTABLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/engine.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/gateway.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/gateway.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/order_check.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/replicated_exchange.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/replicated_exchange.hpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/replication.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/replication.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/protocol.hpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/spsc_queue.hpp
@@ -189,6 +224,7 @@ if(CLANG_FORMAT_EXECUTABLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_session_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/gateway_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/replication_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/spsc_queue_test.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/loadgen.cpp
     )
