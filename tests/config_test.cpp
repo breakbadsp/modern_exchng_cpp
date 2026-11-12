@@ -276,6 +276,21 @@ TEST(ConfigTest, RejectsAMissingGatewayKey)
   ExpectError(kText, 0, "missing gateway key 'port'");
 }
 
+TEST(ConfigTest, AcceptsNoGatewayPortWithReplicaRecords)
+{
+  constexpr std::string_view kText = "engine 0\n"
+                                     "symbol 1 0 100 10 1 1000\n"
+                                     "session alice secret\n"
+                                     "gateway address 127.0.0.1\n"
+                                     "gateway max_connections 64\n"
+                                     "gateway inbound_queue_capacity 1024\n"
+                                     "gateway outbound_queue_capacity 1024\n"
+                                     "replica 127.0.0.1:7000 9001\n";
+  const auto config = mex::ParseConfig(kText);
+  ASSERT_TRUE(config.has_value());
+  EXPECT_EQ(config->replicas_.at(0).gateway_port_, 9001);
+}
+
 TEST(ConfigTest, ParsesReplicaRecordsInOrder)
 {
   const auto without = mex::ParseConfig(kValid);
