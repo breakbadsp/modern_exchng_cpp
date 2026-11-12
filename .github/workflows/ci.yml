@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test (${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # C++26 contracts require GCC 16 with -fcontracts.
+    container: gcc:16.2.0-trixie
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [ninja, ninja-asan-ubsan]
+    env:
+      CC: gcc
+      CXX: g++
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends cmake ninja-build libgtest-dev
+
+      - name: Configure
+        run: cmake --preset "${{ matrix.preset }}"
+
+      - name: Build
+        run: cmake --build --preset "${{ matrix.preset }}" --parallel 2
+
+      - name: Test
+        run: ctest --preset "${{ matrix.preset }}" --output-on-failure --no-tests=error
