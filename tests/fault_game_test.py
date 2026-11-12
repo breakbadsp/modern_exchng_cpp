@@ -3,6 +3,7 @@
 
 Run: python3 tests/fault_game_test.py [path/to/mex_exchange]
 """
+import http.client
 import json
 import os
 from pathlib import Path
@@ -39,9 +40,12 @@ def rendered_page(url):
 def main():
     binary = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / 'build/mex_exchange'
     with tempfile.TemporaryFile(mode='w+') as output:
+        # Start as a shell starts a background job: with SIGINT ignored.
+        # The server must still stop on SIGINT.
         server = subprocess.Popen([sys.executable, str(ROOT / 'tools/fault_game/server.py'),
                                    '--port', '0', '--rate', '30', '--exchange', str(binary)],
-                                  stdout=output, stderr=subprocess.STDOUT)
+                                  stdout=output, stderr=subprocess.STDOUT,
+                                  preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
         work_dir = None
         try:
             deadline = time.monotonic() + 15
@@ -103,14 +107,31 @@ def main():
             for asset, content_type in (('/game.js', 'text/javascript'), ('/game.css', 'text/css')):
                 with urllib.request.urlopen(url + asset) as response:
                     assert response.headers['Content-Type'].startswith(content_type) and response.read()
-            for payload in ({'action': 'crash', 'replica': -1}, {'action': 'crash', 'replica': True}, []):
+            for payload in ({'action': 'crash', 'replica': -1}, {'action': 'crash', 'replica': True}, [],
+                            {'action': 'verify', 'replica': 99}, {'action': 'heal', 'replica': 0},
+                            {'action': 'heal', 'extra': 1}):
                 request = urllib.request.Request(url + '/api/action', data=json.dumps(payload).encode(),
                                                  headers={'Content-Type': 'application/json'})
                 try:
                     urllib.request.urlopen(request)
-                    raise AssertionError('Invalid action was accepted')
+                    raise AssertionError(f'Invalid action was accepted: {payload}')
                 except urllib.error.HTTPError as error:
                     assert error.code == 400
+            # A malformed length gets a clean error, not a Python exception text.
+            connection = http.client.HTTPConnection(url.removeprefix('http://'), timeout=5)
+            connection.putrequest('POST', '/api/action')
+            connection.putheader('Content-Type', 'application/json')
+            connection.putheader('Content-Length', 'x')
+            connection.endheaders()
+            response = connection.getresponse()
+            assert response.status == 400 and json.load(response) == {'error': 'Invalid request length'}
+            connection.close()
+            # The media type is case-insensitive and can have parameters.
+            for content_type in ('application/json; charset=utf-8', 'Application/JSON'):
+                request = urllib.request.Request(url + '/api/action', data=b'{"action":"heal"}',
+                                                 headers={'Content-Type': content_type})
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    assert json.load(response)['ok'], content_type
             request = urllib.request.Request(url + '/api/action', data=b'{"action":"heal"}',
                 headers={'Content-Type': 'application/json', 'Origin': 'https://example.com'})
             try:
@@ -221,7 +242,7 @@ def main():
                   'Writer blocked before verification')
             action('verify')
         finally:
-            server.send_signal(signal.SIGTERM)
+            server.send_signal(signal.SIGINT)
             timed_out = False
             try:
                 server.wait(timeout=15)
