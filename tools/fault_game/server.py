@@ -9,10 +9,12 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -25,6 +27,9 @@ REPLICA_COUNT = 7
 QUORUM = REPLICA_COUNT // 2 + 1
 FAULT_LIMIT = REPLICA_COUNT - QUORUM
 REPLICAS = range(REPLICA_COUNT)
+
+# One game writes about 540 MB of replica storage.
+STORAGE_BYTES = 600 * 1024 * 1024
 
 # The order client reports a stall when no terminal report arrives for this time.
 STALL_SECONDS = 3
@@ -138,10 +143,10 @@ class Client:
 
 
 class Game:
-    def __init__(self, binary, rate):
+    def __init__(self, binary, rate, storage_dir=None):
         self.binary = str(binary)
         self.rate = rate
-        self.work = Path(tempfile.mkdtemp(prefix='mex-fault-game-'))
+        self.work = Path(tempfile.mkdtemp(prefix='mex-fault-game-', dir=storage_dir))
         self.lock = threading.RLock()
         self.run_lock = threading.Lock()
         self.stop = threading.Event()
@@ -537,7 +542,18 @@ def main():
     parser.add_argument('--exchange', type=Path, default=ROOT / 'build/mex_exchange')
     parser.add_argument('--port', type=int, default=8080)
     parser.add_argument('--rate', type=int, default=30, help='Orders per second, 1..200')
+    parser.add_argument('--storage-dir', type=Path,
+                        help='Directory for the game directory. Default: TMPDIR, else /tmp.')
+    parser.add_argument('--delete-storage', action='store_true',
+                        help='Delete logs and storage when the server stops.')
     args = parser.parse_args()
+    if args.storage_dir and not args.storage_dir.is_dir():
+        parser.error(f'--storage-dir {args.storage_dir} is not a directory')
+    parent = args.storage_dir or Path(tempfile.gettempdir())
+    # A per-user quota can be smaller than this. Replicas then stop when they write.
+    if shutil.disk_usage(parent).free < STORAGE_BYTES:
+        print(f'MEX fault game: warning: {parent} has less than {STORAGE_BYTES >> 20} MiB free. '
+              'Use --storage-dir or TMPDIR.', file=sys.stderr, flush=True)
     if not args.exchange.is_file() or not 0 <= args.port <= 65535 or not 1 <= args.rate <= 200:
         parser.error('Build mex_exchange first. Check --port and --rate (1..200).')
     # Bind before starting processes so an occupied HTTP port cannot leak a cluster.
@@ -552,7 +568,7 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGHUP, shutdown)
     try:
-        game = Game(args.exchange.resolve(), args.rate)
+        game = Game(args.exchange.resolve(), args.rate, args.storage_dir)
         server.game = game
         print(f'MEX fault game: http://127.0.0.1:{server.server_port}', flush=True)
         print(f'Logs and storage: {game.work}', flush=True)
@@ -564,6 +580,8 @@ def main():
     finally:
         if game:
             game.close()
+            if args.delete_storage:
+                shutil.rmtree(game.work)
         server.server_close()
 
 

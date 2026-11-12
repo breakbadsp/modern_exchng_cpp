@@ -55,11 +55,14 @@ digests check agreement; they do not prove that all possible faults are safe.
 Stop the server with Ctrl+C, `kill -INT`, or `kill -TERM`, also when it runs as a
 background job. All child processes stop. They also stop when the server gets
 `SIGHUP` or `SIGKILL`. Logs and storage stay
-in the temporary directory printed at startup. One game uses approximately
-540 MB there. Delete that directory after inspection; if the temporary file
-system is full, the replicas cannot start and the server stops with the
-reason. The service binds only to loopback and controls only its own child
-processes.
+in the directory printed at startup. One game uses approximately 540 MB there.
+Delete that directory after inspection, or start with `--delete-storage`.
+The directory is in `--storage-dir`, else in `TMPDIR`, else in `/tmp`. If
+`/tmp` is a small tmpfs or has a per-user quota, use `--storage-dir` on a
+disk. The server warns at startup when less than 600 MiB is free. If the file
+system fills, the replicas cannot start, or a running replica stops and the
+timeline reports its exit. The service binds only to loopback and controls only
+its own child processes.
 
 Run the real-process verification:
 
