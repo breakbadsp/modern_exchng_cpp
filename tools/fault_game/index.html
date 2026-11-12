@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MEX / Fault lab</title>
+  <link rel="stylesheet" href="game.css">
+</head>
+<body>
+<!-- game.js fills every element that has an id. The cluster size and the
+     quorum come from /api/state, so no replica count is written here. -->
+<div class="wrap">
+  <header class="top">
+    <div class="brand">MEX<span>FAULT LAB</span></div>
+    <div class="tag">Real processes · libvsr</div>
+  </header>
+
+  <section class="intro">
+    <div>
+      <h1>Break the cluster. <span>Keep the orders.</span></h1>
+      <p id="intro">Connecting to the game server…</p>
+    </div>
+    <div class="score">
+      <strong id="score">–</strong>
+      <span>checks completed</span>
+    </div>
+  </section>
+
+  <section class="next" aria-live="polite">
+    <span class="label">Next step</span>
+    <strong id="next-title">Connecting…</strong>
+    <span id="next-text"></span>
+  </section>
+
+  <p class="alert" id="connection" role="alert" hidden></p>
+  <p class="alert" id="action-error" role="alert" hidden></p>
+
+  <main class="columns">
+    <section class="panel" aria-labelledby="cluster-heading">
+      <div class="bar">
+        <h2 id="cluster-heading">Live cluster</h2>
+        <span class="status" id="status" role="status">Connecting…</span>
+      </div>
+
+      <div class="quorum">
+        <div class="figure"><strong id="running">–</strong><span>replicas running</span></div>
+        <div class="figure"><strong id="quorum">–</strong><span>quorum needed</span></div>
+        <p id="capacity"></p>
+      </div>
+
+      <p class="client" id="client">Order client: connecting</p>
+      <ul class="replicas" id="replicas" aria-label="Replicas"></ul>
+
+      <dl class="help">
+        <div><dt>Crash</dt><dd>Kills the process (<code>SIGKILL</code>). Its storage file stays.</dd></div>
+        <div><dt>Freeze</dt><dd>Pauses the process (<code>SIGSTOP</code>). It stays alive but does not answer.</dd></div>
+        <div><dt>Restore</dt><dd>Resumes a frozen process, or starts a crashed one from its storage file.</dd></div>
+      </dl>
+
+      <div class="metrics">
+        <div class="metric"><span>Order acks</span><strong id="acks">0</strong></div>
+        <div class="metric"><span>Duplicate requests</span><strong id="duplicates">0</strong></div>
+        <div class="metric"><span>Fill reports received</span><strong id="fills">0</strong></div>
+      </div>
+
+      <div class="chart">
+        <div class="note">Terminal order reports per second, last 90 seconds</div>
+        <svg viewBox="0 0 700 80" preserveAspectRatio="none" role="img"
+             aria-label="Terminal order reports per second">
+          <path d="M0 75H700" class="axis"/>
+          <path id="chart-area" class="area"/>
+          <path id="chart-line" class="line"/>
+        </svg>
+      </div>
+      <p class="note pad">
+        Cards show the configured members and their process state. The page does not measure
+        replication traffic or the current primary. Counters come from the TCP reports that the
+        order client receives. Fill reports count messages, not unique trades. A duplicate
+        request is an order that the client sent again after an uncertain response.
+      </p>
+    </section>
+
+    <aside class="panel" aria-labelledby="missions-heading">
+      <div class="bar">
+        <h2 id="missions-heading">Your mission</h2>
+      </div>
+      <ol class="missions" id="missions"></ol>
+      <div class="actions">
+        <button class="primary" type="button" id="verify" data-action="verify">Verify recovered state</button>
+        <button class="secondary" type="button" id="heal" data-action="heal">Restore all replicas</button>
+      </div>
+    </aside>
+  </main>
+
+  <section class="columns even">
+    <div class="panel" aria-labelledby="timeline-heading">
+      <div class="bar">
+        <h2 id="timeline-heading">Fault timeline</h2>
+        <span class="note" id="elapsed">0 s</span>
+      </div>
+      <ol class="timeline" id="events" tabindex="0" aria-label="Fault timeline, newest first"></ol>
+    </div>
+
+    <div class="panel" aria-labelledby="proof-heading">
+      <div class="bar">
+        <h2 id="proof-heading">State verification</h2>
+        <span class="status" id="proof-status">Not checked</span>
+      </div>
+      <div class="proof">
+        <p id="proof-text"></p>
+        <progress id="proof-progress" hidden></progress>
+        <table id="digests" hidden>
+          <thead><tr><th scope="col">Replica</th><th scope="col">State digest</th><th scope="col">Commit position</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p class="note">
+          Equal digests at one commit position show agreement at the time of the check only.
+          Reports can be lost during a failure. A duplicate reject confirms that the order was
+          executed, but does not recover its original result.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Process faults only. Disks stay intact and the network is not partitioned.
+    Storage and logs: <span id="work">–</span>. Stop the server with Ctrl+C to stop all replicas.
+  </footer>
+</div>
+<script src="game.js"></script>
+</body>
+</html>

@@ -19,6 +19,12 @@ replicates the orders with Viewstamped Replication. See
 [`docs/replication.md`](docs/replication.md). CMake gets libvsr at configure
 time; pass `-DMEX_LIBVSR_SOURCE_DIR=<path>` to use a local checkout.
 
+## Fault tolerance game
+
+Run `python3 tools/fault_game/server.py` after the build, then open
+`http://127.0.0.1:8080`. Crash or freeze up to three of seven real replicas and
+keep the orders. Remove the quorum of four, restore it, and compare the recovered state. See [the game instructions](tools/fault_game/README.md).
+
 ## Requirements
 
 - C++26 compiler: **GCC 16+** with working `-fcontracts` (configure fails otherwise). Clang is rejected.
