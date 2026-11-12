@@ -23,6 +23,14 @@ request is an average over the loop, not a latency percentile.
 
 ## Tools
 
+CPU counters and call-graph samples now start after construction and warm-up,
+and stop before validation and output. The scripts start perf disabled and use
+an acknowledged control channel with `bench_client perf`. The window includes
+fixed control and timer overhead; use long runs to amortize it. The comparison
+tool requires at least 10,000 counter cycles. Old recordings include startup
+and warm-up; their batch timings remain valid, but their counter normalization
+is approximate.
+
 - `scripts/compare_client.py` builds each variant with the same CMake rules
   and the same `tests/`; only `src/` and LTO differ. A variant source is
   `work`, a git commit, or a directory of replacement `src/` files. Each
@@ -36,12 +44,43 @@ request is an average over the loop, not a latency percentile.
   LTO, most book code is inlined into the client loop, so use a recording
   made with `--lto off` for per-function cost.
 
+The graph tool writes DOT, SVG, JSON, and a standalone HTML viewer. Paths are
+escaped before use in DOT and HTML. The short graph caption keeps node labels
+readable. For the current run:
+
+```sh
+python3 scripts/profile_client.py --cpu 2 --lto off --output build/client_profile_fresh
+python3 scripts/profile_graph.py build/client_profile_fresh --levels 64
+```
+
+The fresh run on the machine below measured 15.16 ns/request as a median batch
+average at 64 levels, and 14.99 CPU ns/request in the counter run. In 2,402
+cycle-weighted samples, `Rest` used 45.1% self / 48.4% total, `Match` 13.1%,
+and cancel plus its level lookup 9.4%. Contracts and LTO were disabled. These
+are in-process measurements and sample estimates, not network latency or exact
+function timers. The output folder contains the raw data and build metadata.
+
 Each tool writes a new directory under `build/` and refuses an existing
 `--output`, so earlier results stay. LTO builds pass
 `-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON` in their own build directory; the
 preset build does not change.
 
 ## Results
+
+### User and system CPU time
+
+Run `cmake --build build --target bench_client`, then
+`python3 scripts/profile_syscalls.py --cpu 2` to repeat the check. The benchmark
+reads thread user/system CPU counters after warm-up and after the measured
+window. Five untraced runs of 160 million requests each used 99.9798% user CPU
+and 0.0202% system CPU in aggregate. Thread accounting has microsecond resolution.
+
+A separate `strace` run covered eight million requests. Between the two usage
+reads it found only two `clock_gettime(CLOCK_PROCESS_CPUTIME_ID)` calls from
+the timing harness. No per-order syscalls were observed. File access, memory
+mapping, and affinity calls occurred outside that window. Normal steady-clock
+reads used the vDSO and did not enter the kernel. These results cover the book,
+not the network gateway. Raw output is in `build/client_syscalls_fresh/`.
 
 Measured on 2026-11-08: Intel Core i5-9500, Linux 7.2.15, GCC 16.2.1,
 pinned to CPU 2. The `powersave` governor and turbo were not controlled.
