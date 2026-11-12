@@ -1,6 +1,7 @@
 #include "config.hpp"
 #include "engine.hpp"
 #include "gateway.hpp"
+#include "replicated_exchange.hpp"
 #include "spsc_queue.hpp"
 
 #include <array>
@@ -21,6 +22,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stop_token>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -201,9 +203,11 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
 
 int main(int p_argc, char **p_argv)
 {
-  if (p_argc != 2)
+  constexpr int kSingleArgCount = 2;     // <config path>
+  constexpr int kReplicatedArgCount = 4; // <config path> <replica> <data path>
+  if (p_argc != kSingleArgCount && p_argc != kReplicatedArgCount)
   {
-    std::println(stderr, "usage: mex_exchange <config path>");
+    std::println(stderr, "usage: mex_exchange <config path> [<replica number> <data path>]");
     return kExitUsage;
   }
   const auto config = mex::LoadConfig(p_argv[1]);
@@ -220,5 +224,33 @@ int main(int p_argc, char **p_argv)
     }
     return kExitFailure;
   }
-  return RunExchange(*config);
+  const bool replicated = p_argc == kReplicatedArgCount;
+  if (replicated != !config->replicas_.empty())
+  {
+    std::println(stderr, "mex_exchange: a config with replica records needs <replica number> "
+                         "<data path>, and a config without them takes neither");
+    return kExitUsage;
+  }
+  if (!replicated)
+  {
+    return RunExchange(*config);
+  }
+  const std::string_view replica_text{p_argv[2]};
+  std::uint8_t replica = 0;
+  const auto parsed =
+      std::from_chars(replica_text.data(), replica_text.data() + replica_text.size(), replica);
+  if (parsed.ec != std::errc{} || parsed.ptr != replica_text.data() + replica_text.size() ||
+      replica >= config->replicas_.size())
+  {
+    std::println(stderr, "mex_exchange: the replica number must be 0 to {}",
+                 config->replicas_.size() - 1);
+    return kExitUsage;
+  }
+  if (const auto installed = InstallStopHandler(); !installed.has_value())
+  {
+    std::println(stderr, "mex_exchange: sigaction: {}", std::strerror(installed.error()));
+    return kExitFailure;
+  }
+  return mex::RunReplicatedExchange(*config, {.replica_ = replica, .data_path_ = p_argv[3]},
+                                    stop_requested);
 }

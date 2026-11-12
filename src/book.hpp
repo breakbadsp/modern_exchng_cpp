@@ -109,6 +109,20 @@ public:
   [[nodiscard]] std::span<const OrderId> FreeSlots() const;
   [[nodiscard]] std::uint32_t MaxOrders() const;
 
+  struct RestingOrder
+  {
+    OrderId slot_ = kInvalidOrderId;
+    Side side_ = Side::Buy;
+    Price price_{};
+    Quantity quantity_{};
+  };
+
+  // Orders are in bid ladder order, then ask ladder order, with FIFO priority.
+  // Rebuilds links and totals. Validates all slots, quantities, and ladder limits.
+  // Failure leaves unspecified state. Does not allocate or match orders.
+  [[nodiscard]] bool Restore(std::span<const RestingOrder> p_orders,
+                             std::span<const OrderId> p_free_slots);
+
 private:
   [[nodiscard]] Quantity Match(Side p_aggressor, const Price *p_limit_price, Quantity p_quantity);
 

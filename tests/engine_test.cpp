@@ -690,6 +690,423 @@ TEST(EngineTest, LimitOrderThatFillsNothingAndCannotRestIsRejected)
 }
 
 // ---------------------------------------------------------------------------
+// Request numbers and op numbers
+
+[[nodiscard]] bool IsOneAck(const Reports &p_reports)
+{
+  return p_reports.size() == 1 && std::holds_alternative<mex::wire::Ack>(p_reports[0].report_);
+}
+
+// Checks that a retried NewOrder does not execute again. Its first attempt
+// fills completely, so its client order id is free and only the request number
+// can stop the retry. The book must be as the first attempt left it.
+TEST(EngineTest, RetriedNewOrderDoesNotExecuteAgainAfterItsFirstAttemptFilled)
+{
+  Harness h;
+  h.Rest(Limit(kA, 1, Side::Sell, 100, 5));
+  const ExchangeOrderId second = h.Rest(Limit(kA, 2, Side::Sell, 100, 5));
+  const Command taker = Limit(kB, 7, Side::Buy, 100, 5);
+  ASSERT_EQ(h.SendAs(10, taker).size(), 3U); // maker Fill, taker Fill, Ack
+
+  EXPECT_EQ(h.SendAs(10, taker), (Reports{RejectR(kB, 7, Reason::DuplicateRequest)}));
+
+  EXPECT_EQ(h.Send(Market(kC, 9, Side::Buy, 20)),
+            (Reports{FillR(kA, second, 2, 100, 5, 0, Liquidity::Maker),
+                     FillR(kC, mex::kNoExchangeOrderId, 9, 100, 5, 15, Liquidity::Taker),
+                     DoneR(kC, 9, Reason::MarketRemainder)}));
+}
+
+// Checks that a retried Replace and a retried Cancel get the reject of their
+// own type, and that the retry changes nothing: the order keeps its priority.
+TEST(EngineTest, RetriedReplaceAndCancelGetTheRejectOfTheirType)
+{
+  Harness h;
+  const ExchangeOrderId first = h.Rest(Limit(kA, 1, Side::Buy, 100, 10));
+  h.Rest(Limit(kB, 2, Side::Buy, 100, 10));
+  ASSERT_EQ(h.SendAs(20, ReplaceOf(kA, 1, 100, 6)), (Reports{ReplaceAckR(kA, 1, 100, 6)}));
+
+  // Executed again, this Replace does not reduce, so it would lose priority.
+  EXPECT_EQ(h.SendAs(20, ReplaceOf(kA, 1, 100, 6)),
+            (Reports{ReplaceRejectR(kA, 1, Reason::DuplicateRequest)}));
+  EXPECT_EQ(h.Send(Limit(kC, 9, Side::Sell, 100, 1)),
+            (Reports{FillR(kA, first, 1, 100, 1, 5, Liquidity::Maker),
+                     FillR(kC, mex::kNoExchangeOrderId, 9, 100, 1, 0, Liquidity::Taker),
+                     AckR(kC, 9, mex::kNoExchangeOrderId, 0)}));
+
+  ASSERT_EQ(h.SendAs(30, CancelOf(kA, 1)), (Reports{CancelAckR(kA, 1)}));
+  EXPECT_EQ(h.SendAs(30, CancelOf(kA, 1)),
+            (Reports{CancelRejectR(kA, 1, Reason::DuplicateRequest)}));
+}
+
+// Checks the rule "above the last applied number of that session": gaps
+// pass, another session does not interfere, and a number that is equal, lower,
+// or 0 is rejected.
+TEST(EngineTest, RequestNumbersAreCheckedForEachSessionAndCanHaveGaps)
+{
+  Harness h;
+
+  EXPECT_TRUE(IsOneAck(h.SendAs(5, Limit(kA, 1, Side::Buy, 100, 1))));
+  // The session sent 6, 7, and 8 to another engine.
+  EXPECT_TRUE(IsOneAck(h.SendAs(9, Limit(kA, 2, Side::Buy, 100, 1))));
+  EXPECT_TRUE(IsOneAck(h.SendAs(3, Limit(kB, 1, Side::Buy, 100, 1))));
+
+  EXPECT_EQ(h.SendAs(9, Limit(kA, 3, Side::Buy, 100, 1)),
+            (Reports{RejectR(kA, 3, Reason::DuplicateRequest)}));
+  EXPECT_EQ(h.SendAs(7, Limit(kA, 3, Side::Buy, 100, 1)),
+            (Reports{RejectR(kA, 3, Reason::DuplicateRequest)}));
+  EXPECT_EQ(h.SendAs(0, Limit(kC, 1, Side::Buy, 100, 1)),
+            (Reports{RejectR(kC, 1, Reason::DuplicateRequest)}));
+  EXPECT_TRUE(IsOneAck(h.SendAs(10, Limit(kA, 3, Side::Buy, 100, 1))));
+}
+
+// Checks that the engine records the op number of each command it applies,
+// also when the command is a duplicate request. The op numbers of one engine
+// have gaps, because the other engines apply the ops between them.
+TEST(EngineTest, RecordsTheLastAppliedOp)
+{
+  Harness h;
+  EXPECT_EQ(h.EngineRef().LastAppliedOp(), OpNumber{});
+
+  const RequestNumber request{1};
+  static_cast<void>(
+      h.SendNumbered(Numbered(Limit(kA, 1, Side::Buy, 100, 1), OpNumber{4}, request)));
+  EXPECT_EQ(h.EngineRef().LastAppliedOp(), OpNumber{4});
+
+  EXPECT_EQ(h.SendNumbered(Numbered(Limit(kA, 2, Side::Buy, 100, 1), OpNumber{9}, request)),
+            (Reports{RejectR(kA, 2, Reason::DuplicateRequest)}));
+  EXPECT_EQ(h.EngineRef().LastAppliedOp(), OpNumber{9});
+}
+
+// Checks that Apply stops the process when an op number is not above the last
+// applied one: the same op again, and a lower one.
+TEST(EngineDeathTest, OpNumberThatDoesNotIncreaseViolatesTheContract)
+{
+  Harness h;
+  const Command order = Limit(kA, 1, Side::Buy, 100, 1);
+  static_cast<void>(h.SendNumbered(Numbered(order, OpNumber{5}, RequestNumber{1})));
+
+  EXPECT_DEATH(h.EngineRef().Apply(Numbered(order, OpNumber{5}, RequestNumber{2})), "");
+  EXPECT_DEATH(h.EngineRef().Apply(Numbered(order, OpNumber{4}, RequestNumber{2})), "");
+}
+
+// ---------------------------------------------------------------------------
+// Determinism and the state digest
+
+// A pseudo-random command stream for both books. The id, price, and quantity
+// ranges are small, so fills, live-id duplicates, unknown orders, and full
+// books are frequent. One command in 8 reuses a recent request number.
+std::vector<Command> GeneratedCommands(std::uint64_t p_seed, std::uint32_t p_count)
+{
+  std::uint64_t state = p_seed;
+  const auto next = [&state]()
+  {
+    state ^= state << 7U;
+    state ^= state >> 9U;
+    state ^= state << 8U;
+    return state;
+  };
+  constexpr std::uint64_t kFirstRequest = 5; // so that a reused number is not below 1
+  std::vector<Command> commands;
+  commands.reserve(p_count);
+  for (std::uint32_t i = 0; i < p_count; ++i)
+  {
+    const auto session = static_cast<SessionId>(kA + next() % 3U);
+    const ClientOrderId id = next() % 24U;
+    const Side side = (next() & 1U) == 0U ? Side::Buy : Side::Sell;
+    const auto price = static_cast<std::int64_t>(95 + next() % 10U);
+    const auto qty = static_cast<std::uint32_t>(1 + next() % 9U);
+    const auto slot = static_cast<std::uint32_t>(next() % kSymbols.size());
+    const std::uint64_t pick = next() % 10U;
+    const Command command = pick < 5U   ? Limit(session, id, side, price, qty, slot)
+                            : pick < 6U ? Market(session, id, side, qty)
+                            : pick < 8U ? CancelOf(session, id)
+                                        : ReplaceOf(session, id, price, qty);
+    const std::uint64_t back = next() % 8U == 0U ? 1 + next() % 4U : 0;
+    commands.push_back(
+        Numbered(command, OpNumber{std::uint64_t{i} + 1}, RequestNumber{kFirstRequest + i - back}));
+  }
+  return commands;
+}
+
+// The evidence that the engine is a valid replicated state machine. Two
+// independent engines get one generated command sequence, one through its
+// inbound queue and one through Apply. After every command their reports and
+// their state digests must be equal. The sequence must reach every report type
+// and every reason that the engine can give, or the comparison shows little.
+TEST(EngineDeterminismTest, TwoEnginesGiveEqualReportsAndDigestsForOneCommandSequence)
+{
+  constexpr std::uint32_t kCommands = 20000;
+  constexpr std::uint32_t kMaxOrders = 12;
+  constexpr std::uint32_t kMaxPriceLevels = 4;
+  Harness popped{kMaxOrders, kMaxPriceLevels};
+  Harness applied{kMaxOrders, kMaxPriceLevels};
+  std::set<std::size_t> report_types;
+  std::set<Reason> reasons;
+
+  for (const Command &command : GeneratedCommands(0x1234cafef00dULL, kCommands))
+  {
+    const Reports reports = popped.SendNumbered(command);
+    ASSERT_EQ(applied.ApplyNumbered(command), reports) << "op " << command.op_number_.value_;
+    ASSERT_EQ(applied.EngineRef().StateDigest(), popped.EngineRef().StateDigest())
+        << "op " << command.op_number_.value_;
+    for (const Report &report : reports)
+    {
+      report_types.insert(report.report_.index());
+      std::visit(
+          [&reasons](const auto &p_message)
+          {
+            if constexpr (requires { p_message.reason_; })
+            {
+              reasons.insert(p_message.reason_);
+            }
+          },
+          report.report_);
+    }
+  }
+
+  EXPECT_EQ(report_types.size(), std::variant_size_v<mex::OrderReport>);
+  EXPECT_EQ(reasons, (std::set<Reason>{Reason::DuplicateClientOrderId, Reason::BookFull,
+                                       Reason::UnknownOrder, Reason::TooLate, Reason::CannotRest,
+                                       Reason::MarketRemainder, Reason::DuplicateRequest}));
+}
+
+// Captures the exact live bytes so comparisons also check canonical serialization.
+std::vector<std::byte> SnapshotOf(const Engine &p_engine)
+{
+  std::vector<std::byte> bytes(p_engine.SnapshotBytesMax());
+  const auto size = p_engine.Snapshot(bytes);
+  EXPECT_TRUE(size.has_value());
+  bytes.resize(size.value_or(0));
+  return bytes;
+}
+
+// Checks restore at several op boundaries and compares every later report and digest.
+TEST(EngineSnapshotTest, GeneratedCommandsContinueAfterRestore)
+{
+  const auto commands = GeneratedCommands(0x1234cafef00dULL, 3000);
+  for (const std::size_t boundary : {0U, 1U, 37U, 500U, 1999U})
+  {
+    Harness a{12, 4};
+    for (std::size_t i = 0; i < boundary; ++i)
+    {
+      static_cast<void>(a.ApplyNumbered(commands[i]));
+    }
+    Harness b{12, 4};
+    const auto snapshot = SnapshotOf(a.EngineRef());
+    ASSERT_TRUE(b.EngineRef().Restore(snapshot));
+    ASSERT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest());
+    ASSERT_EQ(b.EngineRef().LastAppliedOp(), a.EngineRef().LastAppliedOp());
+    ASSERT_EQ(SnapshotOf(b.EngineRef()), snapshot);
+    for (std::size_t i = boundary; i < commands.size(); ++i)
+    {
+      ASSERT_EQ(b.ApplyNumbered(commands[i]), a.ApplyNumbered(commands[i])) << i;
+      ASSERT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest()) << i;
+      ASSERT_EQ(b.EngineRef().LastAppliedOp(), a.EngineRef().LastAppliedOp());
+    }
+    EXPECT_EQ(SnapshotOf(b.EngineRef()), SnapshotOf(a.EngineRef()));
+    // Restore must also replace an occupied book and clear the old client index.
+    ASSERT_TRUE(b.EngineRef().Restore(snapshot));
+    Harness original{12, 4};
+    ASSERT_TRUE(original.EngineRef().Restore(snapshot));
+    EXPECT_EQ(b.EngineRef().StateDigest(), original.EngineRef().StateDigest());
+  }
+}
+
+// Changes one version-1 field. All fields have eight little-endian bytes.
+void SetSnapshotField(std::vector<std::byte> &p_bytes, std::size_t p_field, std::uint64_t p_value)
+{
+  for (std::size_t i = 0; i < 8; ++i)
+  {
+    p_bytes[p_field * 8 + i] = static_cast<std::byte>((p_value >> (i * 8U)) & 0xffU);
+  }
+}
+
+// Checks every truncation, trailing bytes, and configuration mismatches.
+TEST(EngineSnapshotTest, RejectsShortTrailingAndUnequalConfiguration)
+{
+  Harness a{4, 2};
+  a.Rest(Limit(kA, 1, Side::Buy, 100, 5));
+  const auto bytes = SnapshotOf(a.EngineRef());
+  Harness b{4, 2};
+  for (std::size_t size = 0; size < bytes.size(); ++size)
+  {
+    EXPECT_FALSE(b.EngineRef().Restore(std::span{bytes}.first(size))) << size;
+    std::vector<std::byte> short_output(size);
+    EXPECT_FALSE(a.EngineRef().Snapshot(short_output).has_value()) << size;
+  }
+  auto trailing = bytes;
+  trailing.push_back(std::byte{});
+  EXPECT_FALSE(b.EngineRef().Restore(trailing));
+  Harness other_orders{5, 2};
+  Harness other_levels{4, 3};
+  EXPECT_FALSE(other_orders.EngineRef().Restore(bytes));
+  EXPECT_FALSE(other_levels.EngineRef().Restore(bytes));
+  // The header contains version, book count, session count, then book configurations.
+  for (const std::size_t field : {0U, 1U, 2U, 3U, 4U, 5U, 6U})
+  {
+    auto corrupt = bytes;
+    SetSnapshotField(corrupt, field, 999);
+    EXPECT_FALSE(b.EngineRef().Restore(corrupt)) << field;
+  }
+  EXPECT_TRUE(b.EngineRef().Restore(bytes));
+  EXPECT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest());
+}
+
+// Checks individual invalid slots, keys, quantities, owners, and counts.
+TEST(EngineSnapshotTest, RejectsCorruptStateFields)
+{
+  Harness a{4, 2};
+  a.Rest(Limit(kA, 1, Side::Buy, 100, 5)); // slot 3
+  a.Rest(Limit(kA, 2, Side::Buy, 100, 6)); // slot 2
+  const auto bytes = SnapshotOf(a.EngineRef());
+  // Header is 14 fields. Bid level: count, price, order count, then two orders.
+  const std::array<std::pair<std::size_t, std::uint64_t>, 17> corruptions{{{14, 3},
+                                                                           {16, 0},
+                                                                           {16, 5},
+                                                                           {17, 4},
+                                                                           {22, 3},
+                                                                           {18, 0},
+                                                                           {18, 0x100000000ULL},
+                                                                           {19, kSessionCount},
+                                                                           {25, 1},
+                                                                           {21, 0xffffffffULL},
+                                                                           {27, 3},
+                                                                           {28, 0x100000000ULL},
+                                                                           {32, 1},
+                                                                           {32, 5},
+                                                                           {33, 4},
+                                                                           {33, 3},
+                                                                           {34, 0}}};
+  for (const auto &[field, value] : corruptions)
+  {
+    Harness b{4, 2};
+    auto corrupt = bytes;
+    SetSnapshotField(corrupt, field, value);
+    EXPECT_FALSE(b.EngineRef().Restore(corrupt)) << field;
+    ASSERT_TRUE(b.EngineRef().Restore(bytes));
+    EXPECT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest());
+  }
+}
+
+// Checks strict ladder order for both sides and rejects crossed books.
+TEST(EngineSnapshotTest, RejectsInvalidLadderPrices)
+{
+  for (const Side side : {Side::Buy, Side::Sell})
+  {
+    Harness a{4, 2};
+    a.Rest(Limit(kA, 1, side, 99, 5));
+    a.Rest(Limit(kA, 2, side, 100, 6));
+    auto bytes = SnapshotOf(a.EngineRef());
+    // The empty bid count precedes the asks for a sell-only book.
+    const std::size_t first_price = side == Side::Buy ? 15 : 16;
+    SetSnapshotField(bytes, first_price + 7, side == Side::Buy ? 99 : 100);
+    Harness b{4, 2};
+    EXPECT_FALSE(b.EngineRef().Restore(bytes));
+  }
+  Harness a{4, 2};
+  a.Rest(Limit(kA, 1, Side::Buy, 99, 5));
+  a.Rest(Limit(kA, 2, Side::Sell, 100, 6));
+  auto bytes = SnapshotOf(a.EngineRef());
+  SetSnapshotField(bytes, 23, 99); // Ask price equals the best bid.
+  Harness b{4, 2};
+  EXPECT_FALSE(b.EngineRef().Restore(bytes));
+}
+
+// Checks that live records increase size and that discard mode preserves state.
+TEST(EngineSnapshotTest, ReportsCanBeDisabledAndEnabled)
+{
+  Harness a;
+  Harness b;
+  const auto empty_size = SnapshotOf(a.EngineRef()).size();
+  const auto initial_digest = b.EngineRef().StateDigest();
+  b.EngineRef().SetReportsEnabled(false);
+  const Command rest = Numbered(Limit(kA, 1, Side::Sell, 100, 5), OpNumber{1}, RequestNumber{1});
+  EXPECT_FALSE(a.ApplyNumbered(rest).empty());
+  b.EngineRef().Apply(rest);
+  EXPECT_FALSE(b.Outbound().TryPop().has_value());
+  EXPECT_NE(b.EngineRef().StateDigest(), initial_digest);
+  EXPECT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest());
+  EXPECT_GT(SnapshotOf(a.EngineRef()).size(), empty_size);
+  b.EngineRef().SetReportsEnabled(true);
+  const Command take = Numbered(Market(kB, 9, Side::Buy, 3), OpNumber{2}, RequestNumber{2});
+  EXPECT_EQ(a.ApplyNumbered(take), b.ApplyNumbered(take));
+  EXPECT_EQ(b.EngineRef().StateDigest(), a.EngineRef().StateDigest());
+}
+
+// Checks that another generated sequence of the same length ends with another digest.
+TEST(EngineDeterminismTest, DifferentCommandSequenceGivesADifferentDigest)
+{
+  constexpr std::uint32_t kCommands = 2000;
+  Harness first;
+  Harness other;
+  for (const Command &command : GeneratedCommands(1, kCommands))
+  {
+    static_cast<void>(first.ApplyNumbered(command));
+  }
+  for (const Command &command : GeneratedCommands(2, kCommands))
+  {
+    static_cast<void>(other.ApplyNumbered(command));
+  }
+
+  EXPECT_NE(first.EngineRef().StateDigest(), other.EngineRef().StateDigest());
+}
+
+// The digest after p_commands, sent as requests 1, 2, and so on.
+std::uint64_t DigestAfter(std::initializer_list<Command> p_commands)
+{
+  Harness h;
+  for (const Command &command : p_commands)
+  {
+    static_cast<void>(h.Send(command));
+  }
+  return h.EngineRef().StateDigest();
+}
+
+// Checks that each part of the replicated state changes the digest. Each pair
+// of sequences has the same length and the same request numbers, and differs
+// in the one part that its comment names.
+TEST(EngineDigestTest, DependsOnEachPartOfTheState)
+{
+  const Command rest_a1 = Limit(kA, 1, Side::Sell, 100, 10);
+  const Command rest_a2 = Limit(kA, 2, Side::Sell, 100, 10);
+  const std::uint64_t two_resting = DigestAfter({rest_a1, rest_a2});
+  EXPECT_EQ(two_resting, DigestAfter({rest_a1, rest_a2}));
+
+  // Book: quantity, price, and book (symbol slot) of a resting order.
+  EXPECT_NE(two_resting, DigestAfter({rest_a1, Limit(kA, 2, Side::Sell, 100, 11)}));
+  EXPECT_NE(two_resting, DigestAfter({rest_a1, Limit(kA, 2, Side::Sell, 101, 10)}));
+  EXPECT_NE(two_resting, DigestAfter({rest_a1, Limit(kA, 2, Side::Sell, 100, 10, 1)}));
+  // Time priority and client-order index: which client order id has which slot.
+  EXPECT_NE(two_resting, DigestAfter({rest_a2, rest_a1}));
+  // Order metadata: the filled quantity. Both books end with 6 resting.
+  EXPECT_NE(DigestAfter({rest_a1, Limit(kB, 9, Side::Buy, 100, 4)}),
+            DigestAfter({Limit(kA, 1, Side::Sell, 100, 6), CancelOf(kB, 9)}));
+  // Slot generation: an order that rested and left, against no order at all.
+  EXPECT_NE(DigestAfter({rest_a1, CancelOf(kA, 1)}),
+            DigestAfter({CancelOf(kA, 1), CancelOf(kA, 1)}));
+  // Free slots: the orders leave in another order, so the next order takes another slot.
+  EXPECT_NE(DigestAfter({rest_a1, rest_a2, CancelOf(kA, 1), CancelOf(kA, 2)}),
+            DigestAfter({rest_a1, rest_a2, CancelOf(kA, 2), CancelOf(kA, 1)}));
+}
+
+// Checks that the client table and the last applied op change the digest when
+// the books are equal.
+TEST(EngineDigestTest, DependsOnTheClientTableAndTheLastAppliedOp)
+{
+  Harness request_5;
+  Harness request_6;
+  static_cast<void>(request_5.SendAs(5, Limit(kA, 1, Side::Sell, 100, 10)));
+  static_cast<void>(request_6.SendAs(6, Limit(kA, 1, Side::Sell, 100, 10)));
+  EXPECT_NE(request_5.EngineRef().StateDigest(), request_6.EngineRef().StateDigest());
+
+  // A duplicate request changes only the last applied op.
+  const std::uint64_t before = request_5.EngineRef().StateDigest();
+  ASSERT_EQ(request_5.SendAs(5, Limit(kA, 1, Side::Sell, 100, 10)),
+            (Reports{RejectR(kA, 1, Reason::DuplicateRequest)}));
+  EXPECT_NE(request_5.EngineRef().StateDigest(), before);
+}
+
+// ---------------------------------------------------------------------------
 // Order lifecycle over random commands
 
 enum class CommandKind : std::uint8_t
@@ -946,260 +1363,6 @@ TEST(EngineTest, OrderLifecycleHoldsOverManyRandomCommands)
   EXPECT_GT(moved, 0U);
   EXPECT_GT(makers_partly_filled, 0U);
   EXPECT_GT(makers_filled, 0U);
-}
-
-// ---------------------------------------------------------------------------
-// Request numbers and op numbers
-
-[[nodiscard]] bool IsOneAck(const Reports &p_reports)
-{
-  return p_reports.size() == 1 && std::holds_alternative<mex::wire::Ack>(p_reports[0].report_);
-}
-
-// Checks that a retried NewOrder does not execute again. Its first attempt
-// fills completely, so its client order id is free and only the request number
-// can stop the retry. The book must be as the first attempt left it.
-TEST(EngineTest, RetriedNewOrderDoesNotExecuteAgainAfterItsFirstAttemptFilled)
-{
-  Harness h;
-  h.Rest(Limit(kA, 1, Side::Sell, 100, 5));
-  const ExchangeOrderId second = h.Rest(Limit(kA, 2, Side::Sell, 100, 5));
-  const Command taker = Limit(kB, 7, Side::Buy, 100, 5);
-  ASSERT_EQ(h.SendAs(10, taker).size(), 3U); // maker Fill, taker Fill, Ack
-
-  EXPECT_EQ(h.SendAs(10, taker), (Reports{RejectR(kB, 7, Reason::DuplicateRequest)}));
-
-  EXPECT_EQ(h.Send(Market(kC, 9, Side::Buy, 20)),
-            (Reports{FillR(kA, second, 2, 100, 5, 0, Liquidity::Maker),
-                     FillR(kC, mex::kNoExchangeOrderId, 9, 100, 5, 15, Liquidity::Taker),
-                     DoneR(kC, 9, Reason::MarketRemainder)}));
-}
-
-// Checks that a retried Replace and a retried Cancel get the reject of their
-// own type, and that the retry changes nothing: the order keeps its priority.
-TEST(EngineTest, RetriedReplaceAndCancelGetTheRejectOfTheirType)
-{
-  Harness h;
-  const ExchangeOrderId first = h.Rest(Limit(kA, 1, Side::Buy, 100, 10));
-  h.Rest(Limit(kB, 2, Side::Buy, 100, 10));
-  ASSERT_EQ(h.SendAs(20, ReplaceOf(kA, 1, 100, 6)), (Reports{ReplaceAckR(kA, 1, 100, 6)}));
-
-  // Executed again, this Replace does not reduce, so it would lose priority.
-  EXPECT_EQ(h.SendAs(20, ReplaceOf(kA, 1, 100, 6)),
-            (Reports{ReplaceRejectR(kA, 1, Reason::DuplicateRequest)}));
-  EXPECT_EQ(h.Send(Limit(kC, 9, Side::Sell, 100, 1)),
-            (Reports{FillR(kA, first, 1, 100, 1, 5, Liquidity::Maker),
-                     FillR(kC, mex::kNoExchangeOrderId, 9, 100, 1, 0, Liquidity::Taker),
-                     AckR(kC, 9, mex::kNoExchangeOrderId, 0)}));
-
-  ASSERT_EQ(h.SendAs(30, CancelOf(kA, 1)), (Reports{CancelAckR(kA, 1)}));
-  EXPECT_EQ(h.SendAs(30, CancelOf(kA, 1)),
-            (Reports{CancelRejectR(kA, 1, Reason::DuplicateRequest)}));
-}
-
-// Checks the rule "above the last applied number of that session": gaps
-// pass, another session does not interfere, and a number that is equal, lower,
-// or 0 is rejected.
-TEST(EngineTest, RequestNumbersAreCheckedForEachSessionAndCanHaveGaps)
-{
-  Harness h;
-
-  EXPECT_TRUE(IsOneAck(h.SendAs(5, Limit(kA, 1, Side::Buy, 100, 1))));
-  // The session sent 6, 7, and 8 to another engine.
-  EXPECT_TRUE(IsOneAck(h.SendAs(9, Limit(kA, 2, Side::Buy, 100, 1))));
-  EXPECT_TRUE(IsOneAck(h.SendAs(3, Limit(kB, 1, Side::Buy, 100, 1))));
-
-  EXPECT_EQ(h.SendAs(9, Limit(kA, 3, Side::Buy, 100, 1)),
-            (Reports{RejectR(kA, 3, Reason::DuplicateRequest)}));
-  EXPECT_EQ(h.SendAs(7, Limit(kA, 3, Side::Buy, 100, 1)),
-            (Reports{RejectR(kA, 3, Reason::DuplicateRequest)}));
-  EXPECT_EQ(h.SendAs(0, Limit(kC, 1, Side::Buy, 100, 1)),
-            (Reports{RejectR(kC, 1, Reason::DuplicateRequest)}));
-  EXPECT_TRUE(IsOneAck(h.SendAs(10, Limit(kA, 3, Side::Buy, 100, 1))));
-}
-
-// Checks that the engine records the op number of each command it applies,
-// also when the command is a duplicate request. The op numbers of one engine
-// have gaps, because the other engines apply the ops between them.
-TEST(EngineTest, RecordsTheLastAppliedOp)
-{
-  Harness h;
-  EXPECT_EQ(h.EngineRef().LastAppliedOp(), OpNumber{});
-
-  const RequestNumber request{1};
-  static_cast<void>(
-      h.SendNumbered(Numbered(Limit(kA, 1, Side::Buy, 100, 1), OpNumber{4}, request)));
-  EXPECT_EQ(h.EngineRef().LastAppliedOp(), OpNumber{4});
-
-  EXPECT_EQ(h.SendNumbered(Numbered(Limit(kA, 2, Side::Buy, 100, 1), OpNumber{9}, request)),
-            (Reports{RejectR(kA, 2, Reason::DuplicateRequest)}));
-  EXPECT_EQ(h.EngineRef().LastAppliedOp(), OpNumber{9});
-}
-
-// Checks that Apply stops the process when an op number is not above the last
-// applied one: the same op again, and a lower one.
-TEST(EngineDeathTest, OpNumberThatDoesNotIncreaseViolatesTheContract)
-{
-  Harness h;
-  const Command order = Limit(kA, 1, Side::Buy, 100, 1);
-  static_cast<void>(h.SendNumbered(Numbered(order, OpNumber{5}, RequestNumber{1})));
-
-  EXPECT_DEATH(h.EngineRef().Apply(Numbered(order, OpNumber{5}, RequestNumber{2})), "");
-  EXPECT_DEATH(h.EngineRef().Apply(Numbered(order, OpNumber{4}, RequestNumber{2})), "");
-}
-
-// ---------------------------------------------------------------------------
-// Determinism and the state digest
-
-// A pseudo-random command stream for both books. The id, price, and quantity
-// ranges are small, so fills, live-id duplicates, unknown orders, and full
-// books are frequent. One command in 8 reuses a recent request number.
-std::vector<Command> GeneratedCommands(std::uint64_t p_seed, std::uint32_t p_count)
-{
-  std::uint64_t state = p_seed;
-  const auto next = [&state]()
-  {
-    state ^= state << 7U;
-    state ^= state >> 9U;
-    state ^= state << 8U;
-    return state;
-  };
-  constexpr std::uint64_t kFirstRequest = 5; // so that a reused number is not below 1
-  std::vector<Command> commands;
-  commands.reserve(p_count);
-  for (std::uint32_t i = 0; i < p_count; ++i)
-  {
-    const auto session = static_cast<SessionId>(kA + next() % 3U);
-    const ClientOrderId id = next() % 24U;
-    const Side side = (next() & 1U) == 0U ? Side::Buy : Side::Sell;
-    const auto price = static_cast<std::int64_t>(95 + next() % 10U);
-    const auto qty = static_cast<std::uint32_t>(1 + next() % 9U);
-    const auto slot = static_cast<std::uint32_t>(next() % kSymbols.size());
-    const std::uint64_t pick = next() % 10U;
-    const Command command = pick < 5U   ? Limit(session, id, side, price, qty, slot)
-                            : pick < 6U ? Market(session, id, side, qty)
-                            : pick < 8U ? CancelOf(session, id)
-                                        : ReplaceOf(session, id, price, qty);
-    const std::uint64_t back = next() % 8U == 0U ? 1 + next() % 4U : 0;
-    commands.push_back(
-        Numbered(command, OpNumber{std::uint64_t{i} + 1}, RequestNumber{kFirstRequest + i - back}));
-  }
-  return commands;
-}
-
-// The evidence that the engine is a valid replicated state machine. Two
-// independent engines get one generated command sequence, one through its
-// inbound queue and one through Apply. After every command their reports and
-// their state digests must be equal. The sequence must reach every report type
-// and every reason that the engine can give, or the comparison shows little.
-TEST(EngineDeterminismTest, TwoEnginesGiveEqualReportsAndDigestsForOneCommandSequence)
-{
-  constexpr std::uint32_t kCommands = 20000;
-  constexpr std::uint32_t kMaxOrders = 12;
-  constexpr std::uint32_t kMaxPriceLevels = 4;
-  Harness popped{kMaxOrders, kMaxPriceLevels};
-  Harness applied{kMaxOrders, kMaxPriceLevels};
-  std::set<std::size_t> report_types;
-  std::set<Reason> reasons;
-
-  for (const Command &command : GeneratedCommands(0x1234cafef00dULL, kCommands))
-  {
-    const Reports reports = popped.SendNumbered(command);
-    ASSERT_EQ(applied.ApplyNumbered(command), reports) << "op " << command.op_number_.value_;
-    ASSERT_EQ(applied.EngineRef().StateDigest(), popped.EngineRef().StateDigest())
-        << "op " << command.op_number_.value_;
-    for (const Report &report : reports)
-    {
-      report_types.insert(report.report_.index());
-      std::visit(
-          [&reasons](const auto &p_message)
-          {
-            if constexpr (requires { p_message.reason_; })
-            {
-              reasons.insert(p_message.reason_);
-            }
-          },
-          report.report_);
-    }
-  }
-
-  EXPECT_EQ(report_types.size(), std::variant_size_v<mex::OrderReport>);
-  EXPECT_EQ(reasons, (std::set<Reason>{Reason::DuplicateClientOrderId, Reason::BookFull,
-                                       Reason::UnknownOrder, Reason::TooLate, Reason::CannotRest,
-                                       Reason::MarketRemainder, Reason::DuplicateRequest}));
-}
-
-// Checks that another generated sequence of the same length ends with another digest.
-TEST(EngineDeterminismTest, DifferentCommandSequenceGivesADifferentDigest)
-{
-  constexpr std::uint32_t kCommands = 2000;
-  Harness first;
-  Harness other;
-  for (const Command &command : GeneratedCommands(1, kCommands))
-  {
-    static_cast<void>(first.ApplyNumbered(command));
-  }
-  for (const Command &command : GeneratedCommands(2, kCommands))
-  {
-    static_cast<void>(other.ApplyNumbered(command));
-  }
-
-  EXPECT_NE(first.EngineRef().StateDigest(), other.EngineRef().StateDigest());
-}
-
-// The digest after p_commands, sent as requests 1, 2, and so on.
-std::uint64_t DigestAfter(std::initializer_list<Command> p_commands)
-{
-  Harness h;
-  for (const Command &command : p_commands)
-  {
-    static_cast<void>(h.Send(command));
-  }
-  return h.EngineRef().StateDigest();
-}
-
-// Checks that each part of the replicated state changes the digest. Each pair
-// of sequences has the same length and the same request numbers, and differs
-// in the one part that its comment names.
-TEST(EngineDigestTest, DependsOnEachPartOfTheState)
-{
-  const Command rest_a1 = Limit(kA, 1, Side::Sell, 100, 10);
-  const Command rest_a2 = Limit(kA, 2, Side::Sell, 100, 10);
-  const std::uint64_t two_resting = DigestAfter({rest_a1, rest_a2});
-  EXPECT_EQ(two_resting, DigestAfter({rest_a1, rest_a2}));
-
-  // Book: quantity, price, and book (symbol slot) of a resting order.
-  EXPECT_NE(two_resting, DigestAfter({rest_a1, Limit(kA, 2, Side::Sell, 100, 11)}));
-  EXPECT_NE(two_resting, DigestAfter({rest_a1, Limit(kA, 2, Side::Sell, 101, 10)}));
-  EXPECT_NE(two_resting, DigestAfter({rest_a1, Limit(kA, 2, Side::Sell, 100, 10, 1)}));
-  // Time priority and client-order index: which client order id has which slot.
-  EXPECT_NE(two_resting, DigestAfter({rest_a2, rest_a1}));
-  // Order metadata: the filled quantity. Both books end with 6 resting.
-  EXPECT_NE(DigestAfter({rest_a1, Limit(kB, 9, Side::Buy, 100, 4)}),
-            DigestAfter({Limit(kA, 1, Side::Sell, 100, 6), CancelOf(kB, 9)}));
-  // Slot generation: an order that rested and left, against no order at all.
-  EXPECT_NE(DigestAfter({rest_a1, CancelOf(kA, 1)}),
-            DigestAfter({CancelOf(kA, 1), CancelOf(kA, 1)}));
-  // Free slots: the orders leave in another order, so the next order takes another slot.
-  EXPECT_NE(DigestAfter({rest_a1, rest_a2, CancelOf(kA, 1), CancelOf(kA, 2)}),
-            DigestAfter({rest_a1, rest_a2, CancelOf(kA, 2), CancelOf(kA, 1)}));
-}
-
-// Checks that the client table and the last applied op change the digest when
-// the books are equal.
-TEST(EngineDigestTest, DependsOnTheClientTableAndTheLastAppliedOp)
-{
-  Harness request_5;
-  Harness request_6;
-  static_cast<void>(request_5.SendAs(5, Limit(kA, 1, Side::Sell, 100, 10)));
-  static_cast<void>(request_6.SendAs(6, Limit(kA, 1, Side::Sell, 100, 10)));
-  EXPECT_NE(request_5.EngineRef().StateDigest(), request_6.EngineRef().StateDigest());
-
-  // A duplicate request changes only the last applied op.
-  const std::uint64_t before = request_5.EngineRef().StateDigest();
-  ASSERT_EQ(request_5.SendAs(5, Limit(kA, 1, Side::Sell, 100, 10)),
-            (Reports{RejectR(kA, 1, Reason::DuplicateRequest)}));
-  EXPECT_NE(request_5.EngineRef().StateDigest(), before);
 }
 
 TEST(EngineTest, FullOutboundQueueStallsUntilTheGatewayDrainsIt)

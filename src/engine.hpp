@@ -112,6 +112,7 @@ public:
 
   [[nodiscard]] std::size_t Capacity() const;
   [[nodiscard]] std::uint32_t Size() const;
+  void Clear();
 
   // The first entry a key probes. Public so tests can build probe chains that wrap.
   [[nodiscard]] std::size_t HomeSlot(SessionId p_owner, wire::ClientOrderId p_client_order_id) const;
@@ -189,6 +190,21 @@ public:
   // applied the same commands have equal digests.
   [[nodiscard]] std::uint64_t StateDigest() const;
 
+  // Engine thread only.
+  // An upper bound of the snapshot size for this configuration.
+  [[nodiscard]] std::size_t SnapshotBytesMax() const;
+  // Writes all replicated state (exactly the state that StateDigest() covers) into p_out.
+  // Returns the size, or nothing if p_out is too small. The bytes are a function of the
+  // state only: explicit little-endian fields, no padding, no addresses, no probe layout.
+  [[nodiscard]] std::optional<std::size_t> Snapshot(std::span<std::byte> p_out) const;
+  // Replaces all replicated state with a snapshot from an engine with equal configuration.
+  // Returns false if the bytes are not a valid snapshot for this configuration; the engine
+  // state is then unspecified, but no call may read or write out of bounds or break a contract.
+  // Must reject trailing bytes.
+  [[nodiscard]] bool Restore(std::span<const std::byte> p_snapshot);
+  // When false, Apply changes state as usual but pushes no report. Default true.
+  void SetReportsEnabled(bool p_enabled);
+
   // Engine thread only. Busy-polls the inbound queue until Stop().
   void Run();
 
@@ -216,6 +232,7 @@ private:
   std::vector<std::unique_ptr<Instrument>> instruments_{};
   std::vector<wire::RequestNumber> client_table_{}; // by SessionId; 0 means none applied
   OpNumber last_applied_op_{};
+  bool reports_enabled_ = true;
   SpscQueue<Command> &inbound_;
   SpscQueue<Report> &outbound_;
   std::atomic<bool> stop_{false};

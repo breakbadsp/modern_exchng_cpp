@@ -3,6 +3,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -30,6 +31,68 @@ constexpr void Mix(std::uint64_t &p_digest, std::uint64_t p_value)
 {
   p_digest = Finalize(p_digest + kGoldenRatio + p_value);
 }
+
+// Version 1 uses unsigned 64-bit little-endian fields throughout. Prices use
+// their two's-complement bits. No native object representation is copied.
+constexpr std::uint64_t kSnapshotVersion = 1;
+constexpr std::size_t kSnapshotFieldBytes = 8;
+
+class SnapshotWriter final
+{
+public:
+  explicit SnapshotWriter(std::span<std::byte> p_out) : out_(p_out) {}
+
+  void Write(std::uint64_t p_value)
+  {
+    if (position_ <= out_.size() && out_.size() - position_ >= kSnapshotFieldBytes)
+    {
+      for (std::size_t i = 0; i < kSnapshotFieldBytes; ++i)
+      {
+        out_[position_ + i] = static_cast<std::byte>((p_value >> (i * 8U)) & 0xffU);
+      }
+    }
+    position_ += kSnapshotFieldBytes;
+  }
+
+  [[nodiscard]] std::optional<std::size_t> Result() const
+  {
+    return position_ <= out_.size() ? std::optional{position_} : std::nullopt;
+  }
+
+private:
+  std::span<std::byte> out_;
+  std::size_t position_ = 0;
+};
+
+class SnapshotReader final
+{
+public:
+  explicit SnapshotReader(std::span<const std::byte> p_bytes) : bytes_(p_bytes) {}
+
+  [[nodiscard]] std::uint64_t Read()
+  {
+    if (bytes_.size() - position_ < kSnapshotFieldBytes)
+    {
+      valid_ = false;
+      return 0;
+    }
+    std::uint64_t value = 0;
+    for (std::size_t i = 0; i < kSnapshotFieldBytes; ++i)
+    {
+      value |= std::uint64_t{std::to_integer<unsigned char>(bytes_[position_ + i])} << (i * 8U);
+    }
+    position_ += kSnapshotFieldBytes;
+    return value;
+  }
+
+  [[nodiscard]] bool Complete() const { return valid_ && position_ == bytes_.size(); }
+  [[nodiscard]] bool Valid() const { return valid_; }
+
+private:
+  std::span<const std::byte> bytes_;
+  std::size_t position_ = 0;
+  bool valid_ = true;
+};
 
 } // namespace
 
@@ -115,12 +178,23 @@ std::size_t ClientOrderIndex::Capacity() const { return mask_ + 1; }
 
 std::uint32_t ClientOrderIndex::Size() const { return size_; }
 
+void ClientOrderIndex::Clear()
+{
+  for (std::size_t i = 0; i <= mask_; ++i)
+  {
+    entries_[i] = Entry{};
+  }
+  size_ = 0;
+}
+
 struct Engine::Instrument
 {
   explicit Instrument(const BookConfig &p_config)
       : book_(p_config.max_orders_, p_config.max_price_levels_),
         meta_(std::make_unique<OrderMeta[]>(p_config.max_orders_)), index_(p_config.max_orders_),
-        symbol_id_(p_config.symbol_id_)
+        symbol_id_(p_config.symbol_id_),
+        restore_orders_(std::make_unique<Book::RestingOrder[]>(p_config.max_orders_)),
+        restore_free_(std::make_unique<OrderId[]>(p_config.max_orders_))
   {
   }
 
@@ -169,10 +243,118 @@ struct Engine::Instrument
     }
   }
 
+  void WriteSide(SnapshotWriter &p_writer, const PriceLadder &p_levels) const
+  {
+    p_writer.Write(p_levels.size());
+    for (const PriceLevel &level : p_levels)
+    {
+      p_writer.Write(static_cast<std::uint64_t>(level.price_.ticks_));
+      p_writer.Write(level.order_count_);
+      OrderId slot = level.head_;
+      for (std::uint32_t i = 0; i < level.order_count_; ++i)
+      {
+        const OrderNode &order = book_.Order(slot);
+        const OrderMeta &meta = meta_[slot];
+        p_writer.Write(slot);
+        p_writer.Write(order.quantity_.units_);
+        p_writer.Write(meta.owner_);
+        p_writer.Write(meta.client_order_id_);
+        p_writer.Write(meta.cum_qty_.units_);
+        slot = order.next_;
+      }
+    }
+  }
+
+  [[nodiscard]] bool ReadSide(SnapshotReader &p_reader, Side p_side, std::uint32_t &p_order_count,
+                              std::size_t p_sessions)
+  {
+    const std::uint64_t levels = p_reader.Read();
+    if (levels > book_.Bids().Capacity())
+    {
+      return false;
+    }
+    Price previous{};
+    for (std::uint64_t i = 0; i < levels; ++i)
+    {
+      const Price price{std::bit_cast<std::int64_t>(p_reader.Read())};
+      const std::uint64_t count = p_reader.Read();
+      if (count == 0 || count > book_.MaxOrders() - p_order_count ||
+          (i > 0 && (p_side == Side::Buy ? price <= previous : price >= previous)))
+      {
+        return false;
+      }
+      previous = price;
+      for (std::uint64_t j = 0; j < count; ++j)
+      {
+        const std::uint64_t slot = p_reader.Read();
+        const std::uint64_t quantity = p_reader.Read();
+        const std::uint64_t owner = p_reader.Read();
+        const std::uint64_t client_id = p_reader.Read();
+        const std::uint64_t cumulative = p_reader.Read();
+        if (!p_reader.Valid() || slot >= book_.MaxOrders() || quantity == 0 ||
+            quantity > std::numeric_limits<std::uint32_t>::max() || owner >= p_sessions ||
+            owner > std::numeric_limits<SessionId>::max() ||
+            cumulative > std::numeric_limits<std::uint32_t>::max() - quantity ||
+            index_.Find(static_cast<SessionId>(owner), client_id).has_value())
+        {
+          return false;
+        }
+        const auto order_slot = static_cast<OrderId>(slot);
+        restore_orders_[p_order_count++] = Book::RestingOrder{
+            order_slot, p_side, price, Quantity{static_cast<std::uint32_t>(quantity)}};
+        OrderMeta &meta = meta_[order_slot];
+        meta.owner_ = static_cast<SessionId>(owner);
+        meta.client_order_id_ = client_id;
+        meta.cum_qty_ = Quantity{static_cast<std::uint32_t>(cumulative)};
+        index_.Insert(meta.owner_, client_id, order_slot);
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] bool ReadState(SnapshotReader &p_reader, std::size_t p_sessions)
+  {
+    index_.Clear();
+    std::uint32_t count = 0;
+    if (!ReadSide(p_reader, Side::Buy, count, p_sessions) ||
+        !ReadSide(p_reader, Side::Sell, count, p_sessions))
+    {
+      return false;
+    }
+    for (OrderId slot = 0; slot < book_.MaxOrders(); ++slot)
+    {
+      const std::uint64_t generation = p_reader.Read();
+      if (generation > std::numeric_limits<std::uint32_t>::max())
+      {
+        return false;
+      }
+      meta_[slot].generation_ = static_cast<std::uint32_t>(generation);
+    }
+    const std::uint64_t free_count = p_reader.Read();
+    if (free_count != book_.MaxOrders() - count)
+    {
+      return false;
+    }
+    for (std::uint64_t i = 0; i < free_count; ++i)
+    {
+      const std::uint64_t slot = p_reader.Read();
+      if (slot >= book_.MaxOrders())
+      {
+        return false;
+      }
+      restore_free_[i] = static_cast<OrderId>(slot);
+    }
+    return p_reader.Valid() &&
+           book_.Restore(std::span{restore_orders_.get(), count},
+                         std::span{restore_free_.get(), static_cast<std::size_t>(free_count)});
+  }
+
   Book book_;
   std::unique_ptr<OrderMeta[]> meta_;
   ClientOrderIndex index_;
   wire::SymbolId symbol_id_;
+  std::unique_ptr<Book::RestingOrder[]> restore_orders_;
+  std::unique_ptr<OrderId[]> restore_free_;
 };
 
 Engine::Engine(std::span<const BookConfig> p_books, std::size_t p_session_count,
@@ -237,6 +419,86 @@ std::uint64_t Engine::StateDigest() const
   }
   return digest;
 }
+
+std::size_t Engine::SnapshotBytesMax() const
+{
+  // Header: version, book count, session count, configurations, last op, client table.
+  std::size_t fields = 4 + instruments_.size() * 3 + client_table_.size();
+  for (const auto &inst : instruments_)
+  {
+    // Two side counts, free count, up to two fields per live level, five per
+    // live order, one generation per slot, and one free entry per slot.
+    fields += 3 + std::size_t{inst->book_.MaxOrders()} * 9;
+  }
+  return fields * kSnapshotFieldBytes;
+}
+
+std::optional<std::size_t> Engine::Snapshot(std::span<std::byte> p_out) const
+{
+  SnapshotWriter writer{p_out};
+  writer.Write(kSnapshotVersion);
+  writer.Write(instruments_.size());
+  writer.Write(client_table_.size());
+  for (const auto &inst : instruments_)
+  {
+    writer.Write(inst->symbol_id_);
+    writer.Write(inst->book_.MaxOrders());
+    writer.Write(inst->book_.Bids().Capacity());
+  }
+  writer.Write(last_applied_op_.value_);
+  for (const wire::RequestNumber request : client_table_)
+  {
+    writer.Write(request.value_);
+  }
+  for (const auto &inst : instruments_)
+  {
+    inst->WriteSide(writer, inst->book_.Bids());
+    inst->WriteSide(writer, inst->book_.Asks());
+    for (OrderId slot = 0; slot < inst->book_.MaxOrders(); ++slot)
+    {
+      writer.Write(inst->meta_[slot].generation_);
+    }
+    writer.Write(inst->book_.FreeSlotCount());
+    for (const OrderId slot : inst->book_.FreeSlots())
+    {
+      writer.Write(slot);
+    }
+  }
+  return writer.Result();
+}
+
+bool Engine::Restore(std::span<const std::byte> p_snapshot)
+{
+  SnapshotReader reader{p_snapshot};
+  if (reader.Read() != kSnapshotVersion || reader.Read() != instruments_.size() ||
+      reader.Read() != client_table_.size())
+  {
+    return false;
+  }
+  for (const auto &inst : instruments_)
+  {
+    if (reader.Read() != inst->symbol_id_ || reader.Read() != inst->book_.MaxOrders() ||
+        reader.Read() != inst->book_.Bids().Capacity())
+    {
+      return false;
+    }
+  }
+  last_applied_op_.value_ = reader.Read();
+  for (wire::RequestNumber &request : client_table_)
+  {
+    request.value_ = reader.Read();
+  }
+  for (const auto &inst : instruments_)
+  {
+    if (!inst->ReadState(reader, client_table_.size()))
+    {
+      return false;
+    }
+  }
+  return reader.Complete();
+}
+
+void Engine::SetReportsEnabled(bool p_enabled) { reports_enabled_ = p_enabled; }
 
 void Engine::Run()
 {
@@ -450,6 +712,10 @@ void Engine::OnMakerFill(Instrument &p_inst, const Fill &p_fill)
 
 void Engine::Emit(SessionId p_session, const OrderReport &p_report)
 {
+  if (!reports_enabled_)
+  {
+    return;
+  }
   const Report report{.session_id_ = p_session, .report_ = p_report};
   if (outbound_.TryPush(report))
   {

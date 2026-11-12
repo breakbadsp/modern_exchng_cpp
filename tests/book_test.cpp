@@ -1,5 +1,6 @@
 #include "book_checks.hpp"
 
+#include <array>
 #include <cstdint>
 #include <limits>
 
@@ -869,6 +870,27 @@ TEST(Replace, NewRestingOrderCanReuseTheOldSlot)
   ExpectResting(replaced, 5);
   EXPECT_EQ(replaced.order_id_, order.order_id_);
   EXPECT_EQ(book.Order(replaced.order_id_).price_, mex::Price{101});
+}
+
+// Checks that restore preserves explicit slots, FIFO links, and the free-slot stack.
+TEST(Restore, PreservesSlotsPriorityAndFreeStack)
+{
+  mex::Book book{4, 2};
+  const std::array orders{
+      mex::Book::RestingOrder{1, mex::Side::Sell, mex::Price{100}, mex::Quantity{5}},
+      mex::Book::RestingOrder{3, mex::Side::Sell, mex::Price{100}, mex::Quantity{6}}};
+  const std::array<mex::OrderId, 2> free_slots{2, 0};
+  ASSERT_TRUE(book.Restore(orders, free_slots));
+  ExpectBookInvariants(book);
+  const auto rest = book.SubmitLimitOrder(mex::Side::Buy, mex::Price{99}, mex::Quantity{1});
+  EXPECT_EQ(rest.order_id_, 0U);
+  const auto take = book.SubmitMarketOrder(mex::Side::Buy, mex::Quantity{7});
+  EXPECT_EQ(take.filled_qty_, mex::Quantity{7});
+  ASSERT_EQ(book.Fills().size(), 2U);
+  EXPECT_EQ(book.Fills()[0].maker_id_, 1U);
+  EXPECT_EQ(book.Fills()[1].maker_id_, 3U);
+  EXPECT_EQ(book.Order(3).quantity_, mex::Quantity{4});
+  ExpectBookInvariants(book);
 }
 
 // Moving an order preserves its peers and the sorted ladders on either side.
