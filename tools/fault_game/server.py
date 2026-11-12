@@ -2,8 +2,11 @@
 """Local fault injection game for a cluster of real MEX/libvsr processes."""
 import argparse
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+import ctypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import re
 import signal
@@ -60,6 +63,18 @@ MISSIONS = [
 def exit_reason(code):
     """Describe a Popen return code for a person."""
     return f'signal {signal.Signals(-code).name}' if code < 0 else f'exit code {code}'
+
+
+PR_SET_PDEATHSIG = 1
+LIBC = ctypes.CDLL(None, use_errno=True)
+
+
+def die_with(parent):
+    """Return a preexec_fn: the child gets SIGKILL when its parent thread ends."""
+    def setup():
+        if LIBC.prctl(PR_SET_PDEATHSIG, signal.SIGKILL) != 0 or os.getppid() != parent:
+            os._exit(1)
+    return setup
 
 
 def frame(kind, body):
@@ -132,6 +147,10 @@ class Game:
         self.stop = threading.Event()
         self.events = deque(maxlen=32)
         self.processes = [None] * REPLICA_COUNT
+        # The kernel kills a replica when the thread that started it ends,
+        # also when this server gets SIGKILL. Start every replica from one
+        # thread that lives as long as the game, not from request threads.
+        self.spawner = ThreadPoolExecutor(max_workers=1, thread_name_prefix='game-spawner')
         self.paused = [False] * REPLICA_COUNT
         self.logs = [None] * REPLICA_COUNT
         # True when the controller stopped the process, or reported its exit.
@@ -202,9 +221,11 @@ class Game:
                 raise ValueError('The game is stopping')
             self.logs[index] = open(self.work / f'replica{index}.log', 'ab', buffering=0)
             try:
-                self.processes[index] = subprocess.Popen(
+                self.processes[index] = self.spawner.submit(
+                    subprocess.Popen,
                     [self.binary, str(self.work / 'exchange.cfg'), str(index),
-                     str(self.work / f'replica{index}.data')], stdout=self.logs[index], stderr=subprocess.STDOUT)
+                     str(self.work / f'replica{index}.data')], stdout=self.logs[index], stderr=subprocess.STDOUT,
+                    preexec_fn=die_with(os.getpid())).result()
             except Exception:
                 self.logs[index].close()
                 raise
@@ -458,6 +479,7 @@ class Game:
         for log in self.logs:
             if log:
                 log.close()
+        self.spawner.shutdown()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -528,6 +550,7 @@ def main():
     # so Ctrl+C and kill -INT or -TERM always stop the game and its replicas.
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGHUP, shutdown)
     try:
         game = Game(args.exchange.resolve(), args.rate)
         server.game = game

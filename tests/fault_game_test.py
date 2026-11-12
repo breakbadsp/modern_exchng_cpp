@@ -55,6 +55,51 @@ def check_startup_failure():
     print('PASS: a startup failure gives the exit status', flush=True)
 
 
+def replica_pids(work_dir):
+    """Return the pids of processes that use this game's storage."""
+    pids = []
+    for cmdline in Path('/proc').glob('[0-9]*/cmdline'):
+        try:
+            if work_dir.encode() in cmdline.read_bytes():
+                pids.append(int(cmdline.parent.name))
+        except OSError:
+            pass
+    return pids
+
+
+def check_server_kill(binary):
+    """A server killed without its shutdown code must not leave replicas."""
+    with tempfile.TemporaryFile(mode='w+') as output:
+        server = subprocess.Popen([sys.executable, str(ROOT / 'tools/fault_game/server.py'),
+                                   '--port', '0', '--exchange', str(binary)],
+                                  stdout=output, stderr=subprocess.STDOUT)
+        work_dir = None
+        try:
+            deadline = time.monotonic() + 15
+            while work_dir is None and time.monotonic() < deadline and server.poll() is None:
+                output.seek(0)
+                match = re.search(r'Logs and storage: (\S+)', output.read())
+                work_dir = match and match.group(1)
+                time.sleep(.1)
+            assert work_dir, 'Server did not start'
+            assert len(replica_pids(work_dir)) == REPLICAS
+            server.kill()
+            server.wait()
+            deadline = time.monotonic() + 5
+            while replica_pids(work_dir) and time.monotonic() < deadline:
+                time.sleep(.1)
+            remaining = replica_pids(work_dir)
+        finally:
+            if server.poll() is None:
+                server.kill()
+                server.wait()
+        for pid in remaining:
+            os.kill(pid, signal.SIGKILL)
+        assert not remaining, f'Replicas outlived a killed server: {remaining}'
+        shutil.rmtree(work_dir)
+    print('PASS: a killed server leaves no replica processes', flush=True)
+
+
 def main():
     binary = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / 'build/mex_exchange'
     with tempfile.TemporaryFile(mode='w+') as output:
@@ -233,6 +278,12 @@ def main():
             print(f'PASS: no order reports with {FAULT_LIMIT + 1} of {REPLICAS} replicas down', flush=True)
 
             action('restart', 0)
+            # The request thread that restarted replica 0 has ended. The
+            # replica must not die with it.
+            restarted = state()['replicas'][0]['pid']
+            time.sleep(.5)
+            snapshot = state()
+            assert snapshot['replicas'][0] == {**snapshot['replicas'][0], 'pid': restarted, 'state': 'running'}
             until(lambda s: s['acks'] > before + 8 and done(s, 'recovery'), 'Recovery resumes trading')
             print('PASS: retained storage recovers and orders resume', flush=True)
 
@@ -308,6 +359,7 @@ def main():
             shutil.rmtree(work_dir)
     print('PASS: server exit leaves no replica processes')
     check_startup_failure()
+    check_server_kill(binary)
 
 
 if __name__ == '__main__':
