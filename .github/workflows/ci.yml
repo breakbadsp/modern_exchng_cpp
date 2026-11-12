@@ -37,8 +37,19 @@ jobs:
           apt-get update
           apt-get install --yes --no-install-recommends cmake ninja-build libgtest-dev
 
+      # libvsr is private. This key has read-only access to that repository.
+      - name: Check out libvsr
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: breakbadsp/libvsr
+          # Match the libvsr commit in CMakeLists.txt.
+          ref: 0a2a771083a92d46035df17d0ee6a0bd62fe8bd5
+          path: .ci/libvsr
+          ssh-key: ${{ secrets.LIBVSR_SSH_KEY }}
+          persist-credentials: false
+
       - name: Configure
-        run: cmake --preset "${{ matrix.preset }}"
+        run: cmake --preset "${{ matrix.preset }}" -DMEX_LIBVSR_SOURCE_DIR="$GITHUB_WORKSPACE/.ci/libvsr"
 
       - name: Build
         run: cmake --build --preset "${{ matrix.preset }}" --parallel 2
