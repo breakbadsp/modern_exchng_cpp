@@ -100,13 +100,36 @@ def check_server_kill(binary):
     print('PASS: a killed server leaves no replica processes', flush=True)
 
 
+def check_delete_storage(binary):
+    """With --delete-storage, a clean stop removes the game directory."""
+    with tempfile.TemporaryDirectory() as storage, tempfile.TemporaryFile(mode='w+') as output:
+        server = subprocess.Popen([sys.executable, str(ROOT / 'tools/fault_game/server.py'), '--port', '0',
+                                   '--exchange', str(binary), '--storage-dir', storage, '--delete-storage'],
+                                  stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and server.poll() is None:
+                output.seek(0)
+                if 'Logs and storage' in output.read():
+                    break
+                time.sleep(.1)
+            assert len(list(Path(storage).iterdir())) == 1, 'Game directory not created'
+        finally:
+            server.send_signal(signal.SIGTERM)
+            server.wait(timeout=15)
+        assert server.returncode == 0 and not list(Path(storage).iterdir()), list(Path(storage).iterdir())
+    print('PASS: --delete-storage removes logs and storage on exit', flush=True)
+
+
 def main():
     binary = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / 'build/mex_exchange'
+    storage = tempfile.mkdtemp(prefix='mex-fault-test-')
     with tempfile.TemporaryFile(mode='w+') as output:
         # Start as a shell starts a background job: with SIGINT ignored.
         # The server must still stop on SIGINT.
         server = subprocess.Popen([sys.executable, str(ROOT / 'tools/fault_game/server.py'),
-                                   '--port', '0', '--rate', '30', '--exchange', str(binary)],
+                                   '--port', '0', '--rate', '30', '--exchange', str(binary),
+                                   '--storage-dir', storage],
                                   stdout=output, stderr=subprocess.STDOUT,
                                   preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
         work_dir = None
@@ -152,6 +175,8 @@ def main():
 
             snapshot = state()
             work_dir = snapshot['work_dir']
+            # The game directory is in the requested storage directory.
+            assert Path(work_dir).parent == Path(storage), (work_dir, storage)
             # The cluster must be seven separate, live exchange processes.
             assert snapshot['cluster']['replica_count'] == REPLICAS, snapshot['cluster']
             assert snapshot['cluster']['quorum'] == QUORUM, snapshot['cluster']
@@ -355,11 +380,11 @@ def main():
             assert not remaining, f'Replica processes leaked: {remaining}'
         assert server.returncode == 0, f'Server exit: {server.returncode}'
         # Seven storage files use much space. Keep them only after a failure.
-        if work_dir and Path(work_dir).name.startswith('mex-fault-game-'):
-            shutil.rmtree(work_dir)
+        shutil.rmtree(storage)
     print('PASS: server exit leaves no replica processes')
     check_startup_failure()
     check_server_kill(binary)
+    check_delete_storage(binary)
 
 
 if __name__ == '__main__':
