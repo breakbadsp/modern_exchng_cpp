@@ -158,7 +158,7 @@ class Game:
             config = ['engine 0', 'symbol 1 0 4096 64 1 1000000',
                       'session trader game-secret']
             config += [f'session probe{i} game-secret' for i in REPLICAS]
-            config += ['gateway address 127.0.0.1', 'gateway port 9000',
+            config += ['gateway address 127.0.0.1',
                        'gateway max_connections 32', 'gateway inbound_queue_capacity 1024',
                        'gateway outbound_queue_capacity 1024']
             config += [f'replica 127.0.0.1:{ports[i]} {self.ports[i]}' for i in REPLICAS]

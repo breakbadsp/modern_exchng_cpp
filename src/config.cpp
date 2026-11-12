@@ -363,7 +363,8 @@ constexpr std::array kRecordKinds{
   {
     return missing("address");
   }
-  if (!keys.port_)
+  // Each replica listens on the gateway port of its replica record.
+  if (!keys.port_ && config.replicas_.empty())
   {
     return missing("port");
   }
@@ -380,7 +381,7 @@ constexpr std::array kRecordKinds{
     return missing("outbound_queue_capacity");
   }
   config.gateway_ = GatewayConfig{.listen_address_ = *keys.listen_address_,
-                                  .port_ = *keys.port_,
+                                  .port_ = keys.port_.value_or(0),
                                   .max_connections_ = *keys.max_connections_,
                                   .inbound_queue_capacity_ = *keys.inbound_queue_capacity_,
                                   .outbound_queue_capacity_ = *keys.outbound_queue_capacity_};
