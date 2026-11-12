@@ -37,6 +37,24 @@ def rendered_page(url):
     return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', dom))
 
 
+def check_startup_failure():
+    """A replica that stops at startup must give its exit status."""
+    with tempfile.TemporaryDirectory() as scratch:
+        binary = Path(scratch) / 'exits'
+        binary.write_text('#!/bin/sh\nexit 3\n')
+        binary.chmod(0o755)
+        result = subprocess.run([sys.executable, str(ROOT / 'tools/fault_game/server.py'),
+                                 '--port', '0', '--exchange', str(binary)],
+                                capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0, result
+    assert re.search(r'Replica 0 stopped during startup with exit code 3: its log \S+replica0.log is empty',
+                     result.stderr), result.stderr
+    work_dir = re.search(r'(\S+)/replica0.log', result.stderr).group(1)
+    if Path(work_dir).name.startswith('mex-fault-game-'):
+        shutil.rmtree(work_dir)
+    print('PASS: a startup failure gives the exit status', flush=True)
+
+
 def main():
     binary = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / 'build/mex_exchange'
     with tempfile.TemporaryFile(mode='w+') as output:
@@ -158,6 +176,15 @@ def main():
                 assert 'Server disconnected' not in page and 'No answer from' not in page, page
                 print('PASS: page shows seven running replicas, the quorum, and the next step', flush=True)
 
+            # A replica can exit without a player action. The timeline must say
+            # so, with the signal, so that it differs from an injected crash.
+            os.kill(state()['replicas'][6]['pid'], signal.SIGKILL)
+            until(lambda s: any('Replica 6 exited unexpectedly with signal SIGKILL' in e['message']
+                                for e in s['events']), 'Unexpected exit report')
+            action('restart', 6)
+            until(lambda s: s['running'] == REPLICAS, 'Restart after unexpected exit')
+            print('PASS: timeline reports an unexpected replica exit', flush=True)
+
             # A live process can stop serving without the controller knowing.
             # The client must try another gateway with the same pending request.
             snapshot = state()
@@ -222,6 +249,10 @@ def main():
                 until(lambda s: s['acks'] > before + 5, 'Trading after verification')
                 print(f'PASS: verification {attempt + 1}: {proof["digests"]}', flush=True)
             assert all(m['done'] for m in state()['missions']), 'Mission checks did not complete'
+            # Crashes and verification stop processes on request. Only the
+            # replica killed outside the game is unexpected.
+            events = [e['message'] for e in state()['events']]
+            assert sum('exited unexpectedly' in m for m in events) == 1, events
 
             # All replicas can lose power and restart from their own storage.
             for i in range(REPLICAS):
@@ -276,6 +307,7 @@ def main():
         if work_dir and Path(work_dir).name.startswith('mex-fault-game-'):
             shutil.rmtree(work_dir)
     print('PASS: server exit leaves no replica processes')
+    check_startup_failure()
 
 
 if __name__ == '__main__':
