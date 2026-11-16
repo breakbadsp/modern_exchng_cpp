@@ -3,11 +3,8 @@
 #include "order_check.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <concepts>
 #include <cstring>
-#include <thread>
-#include <utility>
 
 namespace mex
 {
@@ -20,11 +17,6 @@ constexpr std::uint64_t kClusterId = 0x6D65'7801;
 
 // An unused inbound queue: the state machine calls Engine::Apply directly.
 constexpr std::size_t kUnusedQueueCapacity = 2;
-
-// The bridge checks Stop() at least this often while the cluster is silent.
-constexpr auto kRequestWait = std::chrono::milliseconds{200};
-// Sleep of the bridge when no order waits. It bounds the added latency.
-constexpr auto kIdleSleep = std::chrono::microseconds{50};
 
 constexpr std::size_t kEntrySizeMax = sizeof(SessionId) + wire::kMaxFrameSize;
 
@@ -243,89 +235,6 @@ vsr::Config MakeVsrConfig(const Config &p_config, std::uint8_t p_replica,
   return config;
 }
 
-ReplicationBridge::ReplicationBridge(vsr::io::Client p_client,
-                                     std::span<const EngineQueues> p_queues,
-                                     std::size_t p_batch_bytes_max)
-    : client_(std::move(p_client)), batch_(p_batch_bytes_max)
-{
-  for (const EngineQueues &queues : p_queues)
-  {
-    inbound_.push_back(&queues.inbound_);
-  }
-}
-
-ReplicationBridge::~ReplicationBridge() = default;
-
-void ReplicationBridge::Run()
-{
-  while (!stop_.load(std::memory_order_relaxed))
-  {
-    if (Fill())
-    {
-      Submit();
-    }
-    else
-    {
-      std::this_thread::sleep_for(kIdleSleep);
-    }
-  }
-}
-
-void ReplicationBridge::Stop() { stop_.store(true, std::memory_order_relaxed); }
-
-std::uint64_t ReplicationBridge::AbandonedOrders() const
-{
-  return abandoned_orders_.load(std::memory_order_relaxed);
-}
-
-bool ReplicationBridge::Fill()
-{
-  if (carried_.has_value())
-  {
-    const bool appended = batch_.TryAppend(carried_->session_id_, carried_->order_);
-    contract_assert(appended); // the batch is empty
-    carried_.reset();
-  }
-  // One order from each queue in turn, so a busy engine queue cannot keep
-  // the orders of another out of the batch.
-  std::size_t empty_queues = 0;
-  while (empty_queues < inbound_.size())
-  {
-    const std::optional<Command> command = inbound_[next_queue_]->TryPop();
-    next_queue_ = (next_queue_ + 1) % inbound_.size();
-    if (!command.has_value())
-    {
-      ++empty_queues;
-      continue;
-    }
-    empty_queues = 0;
-    if (!batch_.TryAppend(command->session_id_, command->order_))
-    {
-      carried_ = command;
-      break;
-    }
-  }
-  return batch_.EntryCount() > 0;
-}
-
-void ReplicationBridge::Submit()
-{
-  auto reply = client_.Request(batch_.Bytes(), kRequestWait);
-  // No reply yet: a view change or a slow disk. The outcome is not known,
-  // so wait for this batch; a new batch could apply orders out of order.
-  while (!reply.has_value() && reply.error() == vsr::io::ClientError::Timeout &&
-         !stop_.load(std::memory_order_relaxed))
-  {
-    reply = client_.Resume(kRequestWait);
-  }
-  if (!reply.has_value() && reply.error() == vsr::io::ClientError::Evicted)
-  {
-    // The batch could be applied or not. To send it again could give the
-    // clients a DuplicateRequest reject for an order that executed.
-    abandoned_orders_.store(abandoned_orders_.load(std::memory_order_relaxed) + batch_.EntryCount(),
-                            std::memory_order_relaxed);
-  }
-  batch_.Clear();
-}
+template class BasicReplicationBridge<vsr::io::Client>;
 
 } // namespace mex
