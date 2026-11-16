@@ -1,24 +1,37 @@
 #include "config.hpp"
 #include "engine.hpp"
+#include "gateway.hpp"
 #include "protocol.hpp"
 #include "replication.hpp"
 #include "spsc_queue.hpp"
 #include "vsr/interfaces.hpp"
+#include "vsr/io/client.hpp"
 
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <expected>
+#include <functional>
 #include <gtest/gtest.h>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
+#include <span>
+#include <stop_token>
 #include <string_view>
+#include <thread>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace
 {
 
+using mex::Command;
 using mex::Config;
 using mex::ExchangeStateMachine;
 using mex::OrderBatch;
@@ -356,6 +369,492 @@ TEST(OrderBatch, RefusesAnEntryWhenFull)
   EXPECT_EQ(batch.EntryCount(), 0U);
   EXPECT_TRUE(batch.Bytes().empty());
   EXPECT_TRUE(batch.TryAppend(0, cancel));
+}
+
+// The bridge tests drive mex::BasicReplicationBridge on the test thread with
+// a fake client: no socket, no thread, no sleep. Each test checks what the
+// cluster gets from the bridge, and AbandonedOrders().
+
+using ClientReply = std::expected<std::vector<std::byte>, vsr::io::ClientError>;
+
+// What the fake cluster does with one call of the bridge.
+enum class Outcome
+{
+  Reply = 0,
+  Timeout,
+  Evicted,
+};
+
+// One call of the bridge to the cluster. A Resume has no body.
+struct ClientCall
+{
+  bool resume_ = false;
+  std::vector<std::byte> body_{};
+};
+
+// A stand-in for vsr::io::Client. The test decides the outcome of each call.
+// Like vsr::io::Client, it permits one request in progress: after a timeout
+// the next call must be Resume, and else it must be Request. A call that
+// breaks this rule fails the test and still goes to the cluster, so that a
+// test that drives Run() ends. The real client keeps a copy of the body and
+// sends that copy again on Resume, so the cluster gets the same bytes for
+// each attempt of one batch.
+class FakeClient final
+{
+public:
+  using Cluster = std::function<Outcome(const ClientCall &)>;
+
+  explicit FakeClient(Cluster p_cluster) : cluster_{std::move(p_cluster)} {}
+
+  [[nodiscard]] ClientReply Request(std::span<const std::byte> p_body, std::chrono::milliseconds)
+  {
+    if (waiting_)
+    {
+      ADD_FAILURE() << "Request while a request waits";
+    }
+    return Answer(ClientCall{.resume_ = false, .body_ = {p_body.begin(), p_body.end()}});
+  }
+
+  [[nodiscard]] ClientReply Resume(std::chrono::milliseconds)
+  {
+    if (!waiting_)
+    {
+      ADD_FAILURE() << "Resume with no request that waits";
+    }
+    return Answer(ClientCall{.resume_ = true});
+  }
+
+private:
+  [[nodiscard]] ClientReply Answer(const ClientCall &p_call)
+  {
+    const Outcome outcome = cluster_(p_call);
+    waiting_ = outcome == Outcome::Timeout;
+    switch (outcome)
+    {
+    case Outcome::Reply:
+      return std::vector<std::byte>(mex::kBatchReplyBytes);
+    case Outcome::Timeout:
+      return std::unexpected(vsr::io::ClientError::Timeout);
+    case Outcome::Evicted:
+      return std::unexpected(vsr::io::ClientError::Evicted);
+    }
+    std::unreachable();
+  }
+
+  Cluster cluster_;
+  bool waiting_ = false;
+};
+
+using TestBridge = mex::BasicReplicationBridge<FakeClient>;
+
+// The room that the bridge keeps free for one entry of a batch.
+constexpr std::size_t kEntryBytesMax = sizeof(SessionId) + wire::kMaxFrameSize;
+constexpr std::size_t kInboundCapacity = 1024;
+constexpr std::size_t kUnusedOutboundCapacity = 2;
+
+// The inbound queues of a gateway, one for each engine.
+struct GatewayQueues
+{
+  explicit GatewayQueues(std::size_t p_engine_count)
+  {
+    for (std::size_t index = 0; index < p_engine_count; ++index)
+    {
+      inbound_.push_back(std::make_unique<SpscQueue<Command>>(kInboundCapacity));
+      outbound_.push_back(std::make_unique<SpscQueue<Report>>(kUnusedOutboundCapacity));
+      engine_queues_.push_back({*inbound_.back(), *outbound_.back()});
+    }
+  }
+
+  std::vector<std::unique_ptr<SpscQueue<Command>>> inbound_{};
+  std::vector<std::unique_ptr<SpscQueue<Report>>> outbound_{};
+  std::vector<mex::EngineQueues> engine_queues_{};
+};
+
+// One entry of a batch, by its session and request number.
+struct Entry
+{
+  SessionId session_ = 0;
+  std::uint64_t request_ = 0;
+
+  bool operator==(const Entry &) const = default;
+};
+
+[[nodiscard]] std::vector<Entry> DecodeBatch(std::span<const std::byte> p_body)
+{
+  std::vector<Entry> entries;
+  std::size_t offset = 0;
+  while (offset < p_body.size())
+  {
+    Entry entry;
+    if (p_body.size() - offset < sizeof(entry.session_))
+    {
+      ADD_FAILURE() << "a batch ends inside a session id";
+      break;
+    }
+    std::memcpy(&entry.session_, p_body.subspan(offset).data(), sizeof(entry.session_));
+    offset += sizeof(entry.session_);
+    const auto decoded = wire::DecodeClientFrame(p_body.subspan(offset));
+    if (decoded.status_ != wire::DecodeStatus::Complete)
+    {
+      ADD_FAILURE() << "a batch has a frame that does not decode";
+      break;
+    }
+    offset += decoded.frame_size_;
+    std::visit(
+        [&entry](const auto &p_message)
+        {
+          if constexpr (requires { p_message.request_number_; })
+          {
+            entry.request_ = p_message.request_number_.value_;
+          }
+        },
+        decoded.message_);
+    entries.push_back(entry);
+  }
+  return entries;
+}
+
+// Orders of three kinds, so that the entries of a batch have different sizes.
+[[nodiscard]] mex::ClientOrder MakeOrder(std::uint64_t p_request, std::uint64_t p_kind)
+{
+  const wire::RequestNumber request{p_request};
+  switch (p_kind % 3)
+  {
+  case 0:
+    return wire::Cancel{.request_number_ = request, .client_order_id_ = 1, .symbol_id_ = 1};
+  case 1:
+    return wire::Replace{.request_number_ = request,
+                         .client_order_id_ = 1,
+                         .symbol_id_ = 1,
+                         .new_price_ = mex::Price{100},
+                         .new_total_qty_ = mex::Quantity{1}};
+  default:
+    return wire::NewOrder{.request_number_ = request,
+                          .client_order_id_ = p_request,
+                          .symbol_id_ = 1,
+                          .side_ = mex::Side::Buy,
+                          .type_ = wire::OrderType::Limit,
+                          .price_ = mex::Price{100},
+                          .qty_ = mex::Quantity{1}};
+  }
+}
+
+void Push(GatewayQueues &p_queues, std::size_t p_queue, Entry p_entry)
+{
+  ASSERT_TRUE(p_queues.inbound_[p_queue]->TryPush(
+      Command{.session_id_ = p_entry.session_, .order_ = MakeOrder(p_entry.request_, 2)}));
+}
+
+// A fake cluster that answers with scripted outcomes, then with replies, and
+// keeps each call.
+struct ScriptedCluster
+{
+  [[nodiscard]] FakeClient Client()
+  {
+    return FakeClient{[this](const ClientCall &p_call)
+                      {
+                        calls_.push_back(p_call);
+                        if (outcomes_.empty())
+                        {
+                          return Outcome::Reply;
+                        }
+                        const Outcome outcome = outcomes_.front();
+                        outcomes_.erase(outcomes_.begin());
+                        return outcome;
+                      }};
+  }
+
+  std::vector<Outcome> outcomes_{};
+  std::vector<ClientCall> calls_{};
+};
+
+constexpr std::size_t kLargeBatchBytes = 4096;
+
+// The bridge takes one order from each queue in turn, in the order of each
+// queue, and sends nothing when no order waits.
+TEST(ReplicationBridge, BatchesOneOrderFromEachQueueInTurn)
+{
+  GatewayQueues queues{2};
+  ScriptedCluster cluster;
+  TestBridge bridge{cluster.Client(), queues.engine_queues_, kLargeBatchBytes};
+  EXPECT_FALSE(bridge.Step());
+  EXPECT_TRUE(cluster.calls_.empty());
+
+  for (const std::uint64_t request : {1U, 2U, 3U})
+  {
+    Push(queues, 0, {.session_ = 0, .request_ = request});
+  }
+  for (const std::uint64_t request : {4U, 5U})
+  {
+    Push(queues, 1, {.session_ = 1, .request_ = request});
+  }
+  EXPECT_TRUE(bridge.Step());
+  ASSERT_EQ(cluster.calls_.size(), 1U);
+  EXPECT_FALSE(cluster.calls_[0].resume_);
+  EXPECT_EQ(DecodeBatch(cluster.calls_[0].body_),
+            (std::vector<Entry>{{0, 1}, {1, 4}, {0, 2}, {1, 5}, {0, 3}}));
+  EXPECT_FALSE(bridge.Step());
+  EXPECT_EQ(cluster.calls_.size(), 1U);
+
+  Push(queues, 1, {.session_ = 1, .request_ = 6});
+  EXPECT_TRUE(bridge.Step());
+  ASSERT_EQ(cluster.calls_.size(), 2U);
+  EXPECT_EQ(DecodeBatch(cluster.calls_[1].body_), (std::vector<Entry>{{1, 6}}));
+  EXPECT_EQ(bridge.AbandonedOrders(), 0U);
+}
+
+// An order that does not fit goes first into the next batch. Each order is
+// in exactly one batch, also when the cluster evicts the batch before it.
+TEST(ReplicationBridge, CarriesAnOrderThatDoesNotFitToTheNextBatch)
+{
+  for (const bool evict_first : {false, true})
+  {
+    SCOPED_TRACE(evict_first ? "first batch evicted" : "all batches reply");
+    GatewayQueues queues{1};
+    ScriptedCluster cluster;
+    if (evict_first)
+    {
+      cluster.outcomes_ = {Outcome::Evicted};
+    }
+    constexpr std::size_t kBatchBytes = 2 * kEntryBytesMax;
+    TestBridge bridge{cluster.Client(), queues.engine_queues_, kBatchBytes};
+    constexpr std::uint64_t kOrderCount = 7;
+    std::vector<Entry> pushed;
+    for (std::uint64_t request = 1; request <= kOrderCount; ++request)
+    {
+      pushed.push_back({.session_ = 0, .request_ = request});
+      Push(queues, 0, pushed.back());
+    }
+    for (std::uint64_t step = 0; step < kOrderCount && bridge.Step(); ++step)
+    {
+    }
+    EXPECT_FALSE(bridge.Step());
+
+    std::vector<Entry> sent;
+    for (const ClientCall &call : cluster.calls_)
+    {
+      ASSERT_FALSE(call.resume_);
+      EXPECT_LE(call.body_.size(), kBatchBytes);
+      const std::vector<Entry> entries = DecodeBatch(call.body_);
+      ASSERT_FALSE(entries.empty());
+      sent.insert(sent.end(), entries.begin(), entries.end());
+    }
+    EXPECT_GT(cluster.calls_.size(), 1U); // an order did not fit
+    EXPECT_EQ(sent, pushed);
+    const std::uint64_t first_batch_size = DecodeBatch(cluster.calls_[0].body_).size();
+    EXPECT_EQ(bridge.AbandonedOrders(), evict_first ? first_batch_size : 0U);
+  }
+}
+
+// After a timeout the outcome of the batch is not known. The bridge waits
+// for that batch, and orders that arrive meanwhile go into the next batch.
+TEST(ReplicationBridge, WaitsForTheSameBatchAfterATimeout)
+{
+  GatewayQueues queues{1};
+  ScriptedCluster cluster;
+  cluster.outcomes_ = {Outcome::Timeout, Outcome::Timeout, Outcome::Reply};
+  TestBridge bridge{cluster.Client(), queues.engine_queues_, kLargeBatchBytes};
+  Push(queues, 0, {.session_ = 0, .request_ = 1});
+  Push(queues, 0, {.session_ = 1, .request_ = 2});
+  EXPECT_TRUE(bridge.Step());
+  Push(queues, 0, {.session_ = 0, .request_ = 3});
+  EXPECT_TRUE(bridge.Step());
+  EXPECT_TRUE(bridge.Step());
+  EXPECT_TRUE(bridge.Step());
+  EXPECT_FALSE(bridge.Step());
+
+  ASSERT_EQ(cluster.calls_.size(), 4U);
+  EXPECT_FALSE(cluster.calls_[0].resume_);
+  EXPECT_EQ(DecodeBatch(cluster.calls_[0].body_), (std::vector<Entry>{{0, 1}, {1, 2}}));
+  EXPECT_TRUE(cluster.calls_[1].resume_);
+  EXPECT_TRUE(cluster.calls_[2].resume_);
+  EXPECT_FALSE(cluster.calls_[3].resume_);
+  EXPECT_EQ(DecodeBatch(cluster.calls_[3].body_), (std::vector<Entry>{{0, 3}}));
+  EXPECT_EQ(bridge.AbandonedOrders(), 0U);
+}
+
+// When the cluster evicts the session of the bridge, the bridge drops the
+// batch, counts each of its orders, and does not send it again.
+TEST(ReplicationBridge, CountsTheOrdersOfAnEvictedBatch)
+{
+  GatewayQueues queues{1};
+  ScriptedCluster cluster;
+  cluster.outcomes_ = {Outcome::Evicted, Outcome::Timeout, Outcome::Evicted};
+  TestBridge bridge{cluster.Client(), queues.engine_queues_, kLargeBatchBytes};
+  for (const std::uint64_t request : {1U, 2U, 3U})
+  {
+    Push(queues, 0, {.session_ = 0, .request_ = request});
+  }
+  EXPECT_TRUE(bridge.Step());
+  EXPECT_EQ(bridge.AbandonedOrders(), 3U);
+
+  Push(queues, 0, {.session_ = 0, .request_ = 4});
+  Push(queues, 0, {.session_ = 0, .request_ = 5});
+  EXPECT_TRUE(bridge.Step()); // timeout
+  EXPECT_EQ(bridge.AbandonedOrders(), 3U);
+  EXPECT_TRUE(bridge.Step()); // evicted while it waits
+  EXPECT_EQ(bridge.AbandonedOrders(), 5U);
+
+  Push(queues, 0, {.session_ = 0, .request_ = 6});
+  EXPECT_TRUE(bridge.Step());
+  EXPECT_FALSE(bridge.Step());
+  ASSERT_EQ(cluster.calls_.size(), 4U);
+  EXPECT_EQ(DecodeBatch(cluster.calls_[1].body_), (std::vector<Entry>{{0, 4}, {0, 5}}));
+  EXPECT_TRUE(cluster.calls_[2].resume_);
+  EXPECT_EQ(DecodeBatch(cluster.calls_[3].body_), (std::vector<Entry>{{0, 6}}));
+  EXPECT_EQ(bridge.AbandonedOrders(), 5U);
+}
+
+// Stop() while a batch waits for its reply ends Run() after the current
+// call. The bridge takes no more orders. It does not count the waiting
+// batch as abandoned: only an eviction does that.
+TEST(ReplicationBridge, StopsWhileARequestWaits)
+{
+  GatewayQueues queues{1};
+  TestBridge *running = nullptr;
+  std::vector<ClientCall> calls;
+  FakeClient client{[&](const ClientCall &p_call)
+                    {
+                      calls.push_back(p_call);
+                      if (calls.size() == 2)
+                      {
+                        Push(queues, 0, {.session_ = 0, .request_ = 3});
+                      }
+                      if (calls.size() == 3)
+                      {
+                        running->Stop();
+                      }
+                      return Outcome::Timeout;
+                    }};
+  TestBridge bridge{std::move(client), queues.engine_queues_, kLargeBatchBytes};
+  running = &bridge;
+  Push(queues, 0, {.session_ = 0, .request_ = 1});
+  Push(queues, 0, {.session_ = 0, .request_ = 2});
+  {
+    // Only a safety net: a bridge that goes idle while a batch waits never
+    // gets the third call, and Run() would not end.
+    std::jthread watchdog{
+        [&bridge](std::stop_token p_stop)
+        {
+          std::mutex mutex;
+          std::condition_variable_any ended;
+          std::unique_lock lock{mutex};
+          if (!ended.wait_for(lock, p_stop, std::chrono::seconds{10}, [] { return false; }) &&
+              !p_stop.stop_requested())
+          {
+            bridge.Stop();
+          }
+        }};
+    bridge.Run(); // no sleep: each step makes a call
+  }
+
+  ASSERT_EQ(calls.size(), 3U);
+  EXPECT_FALSE(calls[0].resume_);
+  EXPECT_EQ(DecodeBatch(calls[0].body_), (std::vector<Entry>{{0, 1}, {0, 2}}));
+  EXPECT_TRUE(calls[1].resume_);
+  EXPECT_TRUE(calls[2].resume_);
+  EXPECT_EQ(bridge.AbandonedOrders(), 0U);
+  const std::optional<Command> left = queues.inbound_[0]->TryPop();
+  ASSERT_TRUE(left.has_value());
+  EXPECT_EQ(std::get<wire::NewOrder>(left->order_).request_number_.value_, 3U);
+}
+
+constexpr std::uint64_t kSeedCount = 1000;
+
+// One seeded run of the bridge: random arrival of orders on random queues,
+// random batch sizes, and random outcomes (reply, timeout, eviction). Each
+// order must be in exactly one batch that the cluster got, in the order of
+// its queue, and the orders of the evicted batches must be the abandoned
+// count. The bridge cannot keep an order between the queues of two engines:
+// each engine has its own client table, so the order in each queue is the
+// order that counts.
+void RunBridgeWithRandomFaults(std::uint64_t p_seed)
+{
+  constexpr std::uint64_t kStepCount = 200;
+  constexpr std::uint64_t kArrivalsMax = 4;
+  constexpr std::uint64_t kSessionCount = 2;
+  constexpr std::uint64_t kReplyPercent = 60;
+  constexpr std::uint64_t kTimeoutPercent = 25;
+  std::mt19937_64 random{p_seed};
+  const std::size_t queue_count = 1 + random() % 3;
+  const std::size_t batch_bytes = kEntryBytesMax * (1 + random() % 4);
+  GatewayQueues queues{queue_count};
+  std::vector<std::vector<Entry>> pushed(queue_count);
+  std::vector<std::size_t> queue_of_request{0};
+  std::vector<Entry> sent;
+  std::uint64_t batch_size = 0;
+  std::uint64_t evicted_orders = 0;
+  bool draining = false;
+  FakeClient client{[&](const ClientCall &p_call)
+                    {
+                      if (!p_call.resume_)
+                      {
+                        EXPECT_LE(p_call.body_.size(), batch_bytes);
+                        const std::vector<Entry> entries = DecodeBatch(p_call.body_);
+                        EXPECT_FALSE(entries.empty());
+                        sent.insert(sent.end(), entries.begin(), entries.end());
+                        batch_size = entries.size();
+                      }
+                      const std::uint64_t roll = random() % 100;
+                      if (draining || roll < kReplyPercent)
+                      {
+                        return Outcome::Reply;
+                      }
+                      if (roll < kReplyPercent + kTimeoutPercent)
+                      {
+                        return Outcome::Timeout;
+                      }
+                      evicted_orders += batch_size;
+                      return Outcome::Evicted;
+                    }};
+  TestBridge bridge{std::move(client), queues.engine_queues_, batch_bytes};
+
+  std::uint64_t pushed_count = 0;
+  for (std::uint64_t step = 0; step < kStepCount; ++step)
+  {
+    const std::uint64_t arrivals = random() % (kArrivalsMax + 1);
+    for (std::uint64_t arrival = 0; arrival < arrivals; ++arrival)
+    {
+      const std::size_t queue = random() % queue_count;
+      const Entry entry{.session_ = static_cast<SessionId>(random() % kSessionCount),
+                        .request_ = queue_of_request.size()};
+      ASSERT_TRUE(queues.inbound_[queue]->TryPush(
+          Command{.session_id_ = entry.session_, .order_ = MakeOrder(entry.request_, random())}));
+      queue_of_request.push_back(queue);
+      pushed[queue].push_back(entry);
+      ++pushed_count;
+    }
+    static_cast<void>(bridge.Step());
+  }
+  draining = true;
+  for (std::uint64_t step = 0; step <= pushed_count && bridge.Step(); ++step)
+  {
+  }
+  ASSERT_FALSE(bridge.Step());
+
+  EXPECT_EQ(sent.size(), pushed_count);
+  for (std::size_t queue = 0; queue < queue_count; ++queue)
+  {
+    std::vector<Entry> sent_from_queue;
+    for (const Entry &entry : sent)
+    {
+      if (entry.request_ < queue_of_request.size() && queue_of_request[entry.request_] == queue)
+      {
+        sent_from_queue.push_back(entry);
+      }
+    }
+    EXPECT_EQ(sent_from_queue, pushed[queue]) << "queue " << queue;
+  }
+  EXPECT_EQ(bridge.AbandonedOrders(), evicted_orders);
+}
+
+TEST(ReplicationBridge, SeededFaultsLoseAndRepeatNoOrder)
+{
+  for (std::uint64_t seed = 0; seed < kSeedCount && !HasFailure(); ++seed)
+  {
+    SCOPED_TRACE(testing::Message() << "seed " << seed);
+    RunBridgeWithRandomFaults(seed);
+  }
 }
 
 } // namespace
