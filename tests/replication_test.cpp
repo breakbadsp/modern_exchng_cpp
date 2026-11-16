@@ -258,6 +258,93 @@ TEST(ExchangeStateMachine, PushesNoReportUpToTheStartOperation)
   }
 }
 
+// The report rule compares primary timestamps with the clock of the
+// replica at its start. The tests below record what a clock difference
+// does (docs/replication.md, "Limits"). A replica starts at kStartNs of
+// true time with kSkewLogHead operations in its log. The primary stamps one
+// operation each kOpIntervalNs of true time, at half intervals, so that no
+// stamp is on a limit.
+constexpr std::uint64_t kSkewLogHead = 10;
+constexpr std::uint64_t kSkewStartNs = 1'000'000;
+constexpr std::uint64_t kOpIntervalNs = 100;
+constexpr std::uint64_t kClockDifferenceNs = 300;
+
+// Applies operations 1 to p_last_op to a replica that pushes all reports
+// and to a replica that starts with p_start_clock_ns. Operation
+// p_first_live_op is the first that the primary made after the start.
+// Returns, for each operation, whether the started replica pushed reports.
+// Its reports must be those of the other replica or none.
+[[nodiscard]] std::vector<bool> ReportsAfterStart(std::uint64_t p_start_clock_ns,
+                                                  std::uint64_t p_first_live_op,
+                                                  std::uint64_t p_last_op)
+{
+  const Config config = TestConfig();
+  Node live{config};
+  Node started{config};
+  live.machine_->EmitReportsAfter(0, 0);
+  started.machine_->EmitReportsAfter(kSkewLogHead, p_start_clock_ns);
+  BatchSource source{13};
+  OrderBatch batch{kBodyBytesMax};
+  std::vector<bool> pushed{false}; // no operation 0
+  for (std::uint64_t op = 1; op <= p_last_op; ++op)
+  {
+    // Operation p_first_live_op is half an interval after the start.
+    const std::uint64_t timestamp_ns =
+        kSkewStartNs + kOpIntervalNs / 2 + op * kOpIntervalNs - p_first_live_op * kOpIntervalNs;
+    source.FillBatch(batch, kEntriesPerBatch);
+    static_cast<void>(live.Execute(op, batch.Bytes(), timestamp_ns));
+    static_cast<void>(started.Execute(op, batch.Bytes(), timestamp_ns));
+    const std::vector<Report> reports = live.TakeReports();
+    EXPECT_FALSE(reports.empty());
+    const std::vector<Report> started_reports = started.TakeReports();
+    pushed.push_back(!started_reports.empty());
+    if (!started_reports.empty())
+    {
+      EXPECT_EQ(started_reports, reports) << "op " << op;
+    }
+    EXPECT_EQ(started.machine_->StateDigest(), live.machine_->StateDigest());
+  }
+  return pushed;
+}
+
+// A replica clock that is ahead of the primary drops the reports of the
+// operations that the primary made after the start, for as long as the
+// clock difference. The sessions of this replica are live, so these
+// reports are lost.
+TEST(ExchangeStateMachine, ReplicaClockAheadDropsReportsOfNewOperations)
+{
+  constexpr std::uint64_t kFirstLiveOp = kSkewLogHead + 1;
+  constexpr std::uint64_t kLastOp = kFirstLiveOp + 5;
+  const std::vector<bool> pushed =
+      ReportsAfterStart(kSkewStartNs + kClockDifferenceNs, kFirstLiveOp, kLastOp);
+  // Operations 11 to 13 are stamped 50 to 250 ns after the start: below
+  // the 300 ns difference.
+  const std::vector<bool> expected{false, false, false, false, false, false, false, false, false,
+                                   false, false, false, false, false, true,  true,  true};
+  EXPECT_EQ(pushed, expected);
+}
+
+// A replica clock that is behind the primary pushes the reports of
+// operations that the primary made before the start, if they are above the
+// log head and in the clock difference. Another process already sent these
+// reports, so the sessions get them again.
+TEST(ExchangeStateMachine, ReplicaClockBehindRepeatsReportsOfOlderOperations)
+{
+  // The replica missed operations 11 to 15, and applies them after its
+  // start to catch up.
+  constexpr std::uint64_t kFirstLiveOp = kSkewLogHead + 6;
+  constexpr std::uint64_t kLastOp = kFirstLiveOp + 2;
+  const std::vector<bool> pushed =
+      ReportsAfterStart(kSkewStartNs - kClockDifferenceNs, kFirstLiveOp, kLastOp);
+  // Operations 13 to 15 are stamped 250 to 50 ns before the start: in the
+  // 300 ns difference. Operations 1 to 10 are in the log and push
+  // nothing at any timestamp.
+  const std::vector<bool> expected{false, false, false, false, false, false, false,
+                                   false, false, false, false, false, false, true,
+                                   true,  true,  true,  true,  true};
+  EXPECT_EQ(pushed, expected);
+}
+
 // The body of an operation is bytes from the network. Entries that are not
 // valid are not applied, and no body breaks a contract.
 TEST(ExchangeStateMachine, SkipsEntriesThatAreNotValid)
