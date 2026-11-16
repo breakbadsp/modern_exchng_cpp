@@ -98,6 +98,40 @@ The op number of an order is the libvsr operation number and the index of the
 order in its batch, packed in 64 bits. The op counter of the gateway is not
 used in a cluster.
 
+## Deterministic tests
+
+`tests/replication_test.cpp` drives the replicated path on one thread with
+no socket, no sleep, and a seed. `BasicReplicationBridge` takes its client
+type as a template parameter, and `Step()` makes one call to the cluster.
+`Run()` calls `Step()` in a loop. The tests give a fake client whose
+outcomes the test decides.
+
+What the tests cover:
+
+- The bridge: one order from each queue in turn, an order that does not
+  fit and goes into the next batch, a wait for the same batch after a
+  timeout, an eviction and the abandoned count, and `Stop()` while a batch
+  waits. A seeded test (1000 seeds) gives random arrivals and outcomes. It
+  checks that each order is in exactly one batch, in the order of its
+  queue, or is counted as abandoned.
+- Gateway queues, bridge, and two or three `ExchangeStateMachine` replicas
+  together (1000 seeds). The fake cluster commits batches with random
+  timeouts and evictions. At random it commits a batch two times, and one
+  replica starts from a snapshot. The replicas must give equal reports and
+  digests. A batch that is applied two times gives only `DuplicateRequest`
+  rejects and changes no book.
+- The report rule when the clock of a replica is ahead of or behind the
+  primary (see "Limits").
+
+A failure message gives the seed. The seed loop is deterministic, so the
+same test run gives the same failure again.
+
+What stays untested here: the real threads and queues between them, the
+sockets, `vsr::io::Client`, and the faults of libvsr itself (view changes,
+lost messages, crashes, and storage faults). `tests/replicated_smoke_test.sh`
+covers some of these with real processes, without a seed. A later task will
+run `ExchangeStateMachine` inside the libvsr simulator.
+
 ## Limits
 
 - **Reports can be lost, and the engine does not send them again.** A report
