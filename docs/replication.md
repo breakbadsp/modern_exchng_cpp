@@ -113,7 +113,15 @@ used in a cluster.
   pushes reports only for operations that the primary made after this process
   started. The clocks of the replicas decide this, so keep them in step
   (NTP). A clock difference can drop or repeat reports of the first moments
-  after a start.
+  after a start. If the clock of the replica is ahead, the replica drops the
+  reports of new operations. If it is behind, it pushes again the reports of
+  operations that it missed before its start. The effect lasts for as
+  long as the clock difference. libvsr makes each timestamp larger than the
+  one before it. So, after a primary whose clock was ahead, the timestamps
+  stay ahead until the clock of the new primary passes them, and the time
+  in which reports are repeated can be longer than the difference between
+  the replicas that run now. The tests `ReplicaClockAhead...` and
+  `ReplicaClockBehind...` in `tests/replication_test.cpp` show this rule.
 - **Requests can be lost.** If the cluster removes the libvsr session of a
   bridge, the bridge drops the batch in progress and counts its orders
   ("bridge abandoned orders" at exit). The clients get no report and send
