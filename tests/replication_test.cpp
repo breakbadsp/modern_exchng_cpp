@@ -7,6 +7,7 @@
 #include "vsr/interfaces.hpp"
 #include "vsr/io/client.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -855,6 +856,259 @@ TEST(ReplicationBridge, SeededFaultsLoseAndRepeatNoOrder)
     SCOPED_TRACE(testing::Message() << "seed " << seed);
     RunBridgeWithRandomFaults(seed);
   }
+}
+
+[[nodiscard]] bool IsDuplicateReject(const Report &p_report)
+{
+  return std::visit(
+      [](const auto &p_message)
+      {
+        if constexpr (requires { p_message.reason_; })
+        {
+          return p_message.reason_ == wire::Reason::DuplicateRequest;
+        }
+        return false;
+      },
+      p_report.report_);
+}
+
+// Totals over all seeds, to show that the faults happened.
+struct ClusterFaultCount
+{
+  std::uint64_t duplicates_ = 0;
+  std::uint64_t evictions_ = 0;
+  std::uint64_t restores_ = 0;
+};
+
+// One seeded run of gateway, bridge, and replicas on one thread. The
+// gateway side queues valid orders. The bridge sends batches to a fake
+// cluster with random faults. The cluster commits each batch to all
+// replicas, at most once from the view of the bridge: on a reply, or at
+// random on a timeout or an eviction, whose outcome the bridge does not
+// know. At random the cluster commits a batch a second time, as if it
+// applied a retry twice. One replica starts later from a snapshot.
+//
+// The replicas must have equal digests and equal reports. A reference
+// replica applies each batch once only. A second application must give
+// only DuplicateRequest rejects, and the replicas must give the same
+// reports as the reference. A second application changes the last applied
+// op number of the engines, which the digest includes. So the run ends
+// with one batch that each engine applies, and then the digest of the
+// reference must also be equal: the books and the client tables did not
+// change.
+void RunClusterWithRandomFaults(const Config &p_config, std::uint64_t p_seed,
+                                ClusterFaultCount &p_faults)
+{
+  constexpr std::uint64_t kStepCount = 100;
+  constexpr std::uint64_t kArrivalsMax = 5;
+  constexpr std::uint64_t kSessionCount = 2;
+  constexpr std::uint64_t kReplyPercent = 60;
+  constexpr std::uint64_t kTimeoutPercent = 25;
+  constexpr std::uint64_t kDuplicatePercent = 20;
+  constexpr std::uint64_t kOrderIdCount = 24;
+  std::mt19937_64 random{p_seed};
+  std::vector<std::unique_ptr<Node>> replicas;
+  const std::uint64_t replica_count = 2 + random() % 2;
+  for (std::uint64_t index = 0; index < replica_count; ++index)
+  {
+    replicas.push_back(std::make_unique<Node>(p_config));
+    replicas.back()->machine_->EmitReportsAfter(0, 0);
+  }
+  Node reference{p_config};
+  reference.machine_->EmitReportsAfter(0, 0);
+  const std::uint64_t restore_at_op = 1 + random() % 40;
+  bool restored = false;
+  std::vector<std::byte> snapshot(replicas[0]->machine_->SnapshotBytesMax());
+
+  std::uint64_t op = 0;
+  std::vector<std::byte> in_progress;
+  bool committed = false;
+  std::uint64_t evicted_orders = 0;
+  bool draining = false;
+
+  // Executes one operation on each replica. Returns the reports of the
+  // first replica.
+  const auto execute_on_replicas =
+      [&](std::span<const std::byte> p_body, std::uint32_t p_applied_count)
+  {
+    std::vector<Report> first_reports;
+    for (std::size_t index = 0; index < replicas.size(); ++index)
+    {
+      Node &replica = *replicas[index];
+      EXPECT_EQ(replica.Execute(op, p_body, op), p_applied_count);
+      std::vector<Report> reports = replica.TakeReports();
+      if (index == 0)
+      {
+        first_reports = std::move(reports);
+      }
+      else
+      {
+        EXPECT_EQ(reports, first_reports) << "replica " << index << ", op " << op;
+      }
+    }
+    return first_reports;
+  };
+
+  // A digest walks all books and is slow in a Debug build. The reports of
+  // each operation are compared, and the digests at the end of the run.
+  const auto expect_equal_digests = [&]
+  {
+    const std::uint64_t digest = replicas[0]->machine_->StateDigest();
+    for (std::size_t index = 1; index < replicas.size(); ++index)
+    {
+      EXPECT_EQ(replicas[index]->machine_->StateDigest(), digest)
+          << "replica " << index << ", op " << op;
+    }
+  };
+
+  const auto commit = [&]
+  {
+    committed = true;
+    ++op;
+    const std::uint32_t applied_count = reference.Execute(op, in_progress, op);
+    const std::vector<Report> reports = reference.TakeReports();
+    EXPECT_TRUE(std::ranges::none_of(reports, IsDuplicateReject)) << "op " << op;
+    EXPECT_EQ(execute_on_replicas(in_progress, applied_count), reports) << "op " << op;
+    if (random() % 100 < kDuplicatePercent)
+    {
+      ++p_faults.duplicates_;
+      ++op;
+      const std::vector<Report> again = execute_on_replicas(in_progress, applied_count);
+      EXPECT_EQ(again.size(), applied_count) << "op " << op;
+      EXPECT_TRUE(std::ranges::all_of(again, IsDuplicateReject)) << "op " << op;
+    }
+    if (!restored && op >= restore_at_op)
+    {
+      restored = true;
+      ++p_faults.restores_;
+      const auto snapshot_bytes = replicas[0]->machine_->Snapshot(snapshot);
+      ASSERT_TRUE(snapshot_bytes.has_value());
+      replicas.push_back(std::make_unique<Node>(p_config));
+      replicas.back()->machine_->EmitReportsAfter(0, 0);
+      ASSERT_TRUE(replicas.back()->machine_->Restore(std::span{snapshot}.first(*snapshot_bytes)));
+      EXPECT_EQ(replicas.back()->machine_->StateDigest(), replicas[0]->machine_->StateDigest());
+    }
+  };
+
+  FakeClient client{[&](const ClientCall &p_call)
+                    {
+                      if (!p_call.resume_)
+                      {
+                        in_progress = p_call.body_;
+                        committed = false;
+                      }
+                      const std::uint64_t roll = random() % 100;
+                      Outcome outcome = Outcome::Evicted;
+                      if (draining || roll < kReplyPercent)
+                      {
+                        outcome = Outcome::Reply;
+                      }
+                      else if (roll < kReplyPercent + kTimeoutPercent)
+                      {
+                        outcome = Outcome::Timeout;
+                      }
+                      if (!committed && (outcome == Outcome::Reply || random() % 2 == 0))
+                      {
+                        commit();
+                      }
+                      if (outcome == Outcome::Evicted)
+                      {
+                        ++p_faults.evictions_;
+                        evicted_orders += DecodeBatch(in_progress).size();
+                      }
+                      return outcome;
+                    }};
+  GatewayQueues queues{p_config.engines_.size()};
+  TestBridge bridge{std::move(client), queues.engine_queues_, kBodyBytesMax};
+
+  // The gateway side: valid orders over all symbols, with request numbers
+  // that increase for each session.
+  std::array<std::uint64_t, kSessionCount> last_request{};
+  std::uint64_t pushed_count = 0;
+  for (std::uint64_t step = 0; step < kStepCount; ++step)
+  {
+    const std::uint64_t arrivals = random() % (kArrivalsMax + 1);
+    for (std::uint64_t arrival = 0; arrival < arrivals; ++arrival)
+    {
+      const auto session = static_cast<SessionId>(random() % kSessionCount);
+      const mex::SymbolConfig &symbol = p_config.symbols_[random() % p_config.symbols_.size()];
+      const wire::RequestNumber request{++last_request[session]};
+      const std::uint64_t client_order_id = 1 + random() % kOrderIdCount;
+      const mex::Price price{static_cast<std::int64_t>(95 + random() % 10)};
+      const mex::Quantity quantity{static_cast<std::uint32_t>(1 + random() % 20)};
+      mex::ClientOrder order;
+      switch (random() % 4)
+      {
+      case 0:
+        order = wire::Cancel{.request_number_ = request,
+                             .client_order_id_ = client_order_id,
+                             .symbol_id_ = symbol.symbol_id_};
+        break;
+      case 1:
+        order = wire::Replace{.request_number_ = request,
+                              .client_order_id_ = client_order_id,
+                              .symbol_id_ = symbol.symbol_id_,
+                              .new_price_ = price,
+                              .new_total_qty_ = quantity};
+        break;
+      default:
+        order = wire::NewOrder{.request_number_ = request,
+                               .client_order_id_ = client_order_id,
+                               .symbol_id_ = symbol.symbol_id_,
+                               .side_ = random() % 2 == 0 ? mex::Side::Buy : mex::Side::Sell,
+                               .type_ = wire::OrderType::Limit,
+                               .price_ = price,
+                               .qty_ = quantity};
+        break;
+      }
+      ASSERT_TRUE(queues.inbound_[symbol.engine_]->TryPush(
+          Command{.session_id_ = session, .symbol_slot_ = symbol.slot_, .order_ = order}));
+      ++pushed_count;
+    }
+    static_cast<void>(bridge.Step());
+    if (testing::Test::HasFatalFailure())
+    {
+      return;
+    }
+  }
+  draining = true;
+  for (std::uint64_t step = 0; step <= pushed_count && bridge.Step(); ++step)
+  {
+  }
+  ASSERT_FALSE(bridge.Step());
+  EXPECT_EQ(bridge.AbandonedOrders(), evicted_orders);
+
+  // One new request on each engine sets the last applied op number of each
+  // engine to the same value on all replicas and on the reference.
+  OrderBatch last_batch{kBodyBytesMax};
+  for (std::size_t engine = 0; engine < p_config.engines_.size(); ++engine)
+  {
+    const auto symbol = std::ranges::find(p_config.symbols_, engine, &mex::SymbolConfig::engine_);
+    ASSERT_NE(symbol, p_config.symbols_.end());
+    ASSERT_TRUE(last_batch.TryAppend(0, wire::Cancel{.request_number_ = wire::RequestNumber{~0ULL},
+                                                     .client_order_id_ = 0,
+                                                     .symbol_id_ = symbol->symbol_id_}));
+  }
+  ++op;
+  const std::uint32_t applied_count = reference.Execute(op, last_batch.Bytes(), op);
+  EXPECT_EQ(applied_count, p_config.engines_.size());
+  EXPECT_EQ(execute_on_replicas(last_batch.Bytes(), applied_count), reference.TakeReports());
+  expect_equal_digests();
+  EXPECT_EQ(replicas[0]->machine_->StateDigest(), reference.machine_->StateDigest());
+}
+
+TEST(ReplicatedExchange, SeededFaultsKeepReplicasEqual)
+{
+  const Config config = TestConfig();
+  ClusterFaultCount faults;
+  for (std::uint64_t seed = 0; seed < kSeedCount && !HasFailure(); ++seed)
+  {
+    SCOPED_TRACE(testing::Message() << "seed " << seed);
+    RunClusterWithRandomFaults(config, seed, faults);
+  }
+  EXPECT_GT(faults.duplicates_, 0U);
+  EXPECT_GT(faults.evictions_, 0U);
+  EXPECT_GT(faults.restores_, 0U);
 }
 
 } // namespace
