@@ -57,9 +57,9 @@ struct ReplicaQueues
 };
 
 template <typename Ready>
-std::optional<vsr::HaltReason> RunThreads(vsr::io::Server &p_server, Gateway &p_gateway,
-                                          ReplicationBridge &p_bridge,
-                                          const std::atomic<bool> &p_stop_requested, Ready p_ready)
+[[nodiscard]] std::optional<vsr::HaltReason>
+RunThreads(vsr::io::Server &p_server, Gateway &p_gateway, ReplicationBridge &p_bridge,
+           const std::atomic<bool> &p_stop_requested, Ready p_ready)
 {
   std::atomic<bool> replica_ended{false};
   std::optional<vsr::HaltReason> halt_reason{}; // read after the replica thread ends
