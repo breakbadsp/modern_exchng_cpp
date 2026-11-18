@@ -10,7 +10,7 @@ namespace mex
 {
 
 // Fixed buffer of price levels. Size may change; capacity never does after construct.
-class PriceLadder
+class PriceLadder final
 {
 public:
   PriceLadder() = default;
@@ -59,7 +59,7 @@ private:
 // does not call into user code. A fill with maker_removed_ is a snapshot;
 // do not look that maker_id_ up on the book — Rest may have reused the slot.
 // clang-format off
-class Book
+class Book final
 {
 public:
   explicit Book(std::uint32_t p_max_orders, std::uint32_t p_max_price_levels)
@@ -70,10 +70,12 @@ public:
   Book &operator=(Book &&) = delete;
 
   [[nodiscard]] SubmitResult SubmitLimitOrder(Side p_side, Price p_price, const Quantity p_quantity)
-    post (r: static_cast<std::uint64_t>(r.filled_qty_.units_) + r.remaining_.units_ == p_quantity.units_);
+    post (r: static_cast<std::uint64_t>(r.filled_qty_.units_) + r.remaining_.units_ ==
+             p_quantity.units_);
 
   [[nodiscard]] SubmitResult SubmitMarketOrder(Side p_side, const Quantity p_quantity)
-    post (r: r.filled_qty_ <= p_quantity && r.remaining_ == Quantity{} && r.order_id_ == kInvalidOrderId);
+    post (r: r.filled_qty_ <= p_quantity && r.remaining_ == Quantity{} &&
+             r.order_id_ == kInvalidOrderId);
 
   [[nodiscard]] bool CancelOrder(const OrderId p_order_id)
     post (r: !r || (p_order_id < MaxOrders() && Order(p_order_id).quantity_ == Quantity{}));
@@ -90,11 +92,14 @@ public:
   // The result and Fills() are those of that submit, and it never drops leaves.
   // Rejected changes nothing: the order is not resting, or the new price needs a
   // new level and the ladder has no room even after the order is removed.
-  [[nodiscard]] SubmitResult ReplaceOrder(const OrderId p_order_id, Price p_new_price, const Quantity p_new_quantity)
+  [[nodiscard]] SubmitResult ReplaceOrder(const OrderId p_order_id, Price p_new_price,
+                                          const Quantity p_new_quantity)
     pre (p_new_quantity > Quantity{})
     post (r: r.status_ == SubmitStatus::Rejected ||
-             static_cast<std::uint64_t>(r.filled_qty_.units_) + r.remaining_.units_ == p_new_quantity.units_)
-    post (r: r.status_ == SubmitStatus::Rejected || r.remaining_ == Quantity{} || r.order_id_ != kInvalidOrderId);
+             static_cast<std::uint64_t>(r.filled_qty_.units_) + r.remaining_.units_ ==
+                 p_new_quantity.units_)
+    post (r: r.status_ == SubmitStatus::Rejected || r.remaining_ == Quantity{} ||
+             r.order_id_ != kInvalidOrderId);
 
   [[nodiscard]] const OrderNode &Order(OrderId p_order_id) const
     pre (p_order_id < MaxOrders());
@@ -124,6 +129,7 @@ public:
                              std::span<const OrderId> p_free_slots);
 
 private:
+  [[nodiscard]] bool RestoreOrder(const RestingOrder &p_order);
   [[nodiscard]] Quantity Match(Side p_aggressor, const Price *p_limit_price, Quantity p_quantity);
 
   // p_level_index is LevelIndex(p_order_id). The caller has it, so it is not searched again.
@@ -143,7 +149,8 @@ private:
     pre (p_quantity > Quantity{});
 
   // Rest for a caller that has a free slot and the FindLevel position of p_price.
-  [[nodiscard]] OrderId RestAtLevel(Side p_side, Price p_price, Quantity p_quantity, std::uint32_t p_index)
+  [[nodiscard]] OrderId RestAtLevel(Side p_side, Price p_price, Quantity p_quantity,
+                                    std::uint32_t p_index)
     pre (p_quantity > Quantity{})
     pre (free_count_ > 0);
 

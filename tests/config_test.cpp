@@ -2,10 +2,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <format>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 
 namespace
 {
@@ -328,6 +331,61 @@ TEST(ConfigTest, RejectsMoreReplicasThanTheLibrarySupports)
     text += std::format("replica 10.0.0.{}:7000 9000\n", replica + 1);
   }
   ExpectError(text, 9 + mex::kMaxReplicas, "more than 7 replica records");
+}
+
+TEST(ConfigTest, EnforcesTheTextSizeLimitInMemoryAndOnDisk)
+{
+  // Extend a valid config with a comment to test both sides of the file limit.
+  std::string text{kValid};
+  text += '#';
+  text.resize(mex::kMaxConfigBytes, 'x');
+  ASSERT_TRUE(ParseConfig(text).has_value());
+
+  const auto close_file = [](std::FILE *p_file) { std::fclose(p_file); };
+  const std::unique_ptr<std::FILE, decltype(close_file)> file{std::tmpfile(), close_file};
+  ASSERT_NE(file, nullptr);
+  ASSERT_EQ(std::fwrite(text.data(), 1, text.size(), file.get()), text.size());
+  ASSERT_EQ(std::fflush(file.get()), 0);
+  const auto path = std::format("/proc/self/fd/{}", ::fileno(file.get()));
+  ASSERT_TRUE(mex::LoadConfig(path).has_value());
+
+  text += 'x';
+  const auto memory_result = ParseConfig(text);
+  ASSERT_FALSE(memory_result.has_value());
+  EXPECT_EQ(memory_result.error().line_, 0U);
+
+  ASSERT_NE(std::fputc('x', file.get()), EOF);
+  ASSERT_EQ(std::fflush(file.get()), 0);
+  const auto file_result = mex::LoadConfig(path);
+  ASSERT_FALSE(file_result.has_value());
+  EXPECT_EQ(file_result.error().reason_, memory_result.error().reason_);
+}
+
+TEST(ConfigTest, RejectsANullByteOnItsSourceLine)
+{
+  // C network APIs stop at a null byte and would ignore the rest of the address.
+  std::string text{kValid};
+  text.insert(text.find("127.0.0.1") + std::string_view{"127.0.0.1"}.size(), 1, '\0');
+  ExpectError(text, 4, "unexpected null byte");
+}
+
+TEST(ConfigTest, RejectsMalformedReplicaEndpoints)
+{
+  // The cluster takes a numeric IPv4 endpoint with a nonzero 16-bit port.
+  for (const std::string_view endpoint :
+       {"localhost:7000", "127.0.0.1", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:7x"})
+  {
+    const auto config = ParseConfig(ValidWith(std::format("replica {} 9000", endpoint)));
+    ASSERT_FALSE(config.has_value()) << endpoint;
+    EXPECT_EQ(config.error().line_, 9U);
+  }
+}
+
+TEST(ConfigTest, RejectsTwoPortsThatNameTheSameReplica)
+{
+  // Decimal ports can have leading zeros in libvsr.
+  ExpectError(ValidWith("replica 10.0.0.1:07000 9001\nreplica 10.0.0.1:7000 9002"), 10,
+              "duplicate replica address '10.0.0.1:7000'");
 }
 
 TEST(ConfigTest, RejectsAnEmptyFile) { ExpectError("", 0, "no engine records"); }

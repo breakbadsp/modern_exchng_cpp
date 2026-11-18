@@ -18,8 +18,6 @@ constexpr std::uint64_t kClusterId = 0x6D65'7801;
 // An unused inbound queue: the state machine calls Engine::Apply directly.
 constexpr std::size_t kUnusedQueueCapacity = 2;
 
-constexpr std::size_t kEntrySizeMax = sizeof(SessionId) + wire::kMaxFrameSize;
-
 template <typename F> void PutField(std::span<std::byte> p_out, std::size_t &p_offset, F p_field)
 {
   std::memcpy(p_out.subspan(p_offset, sizeof(F)).data(), &p_field, sizeof(F));
@@ -44,16 +42,23 @@ OrderBatch::OrderBatch(std::size_t p_bytes_max) : bytes_(p_bytes_max) {}
 
 bool OrderBatch::TryAppend(SessionId p_session, const ClientOrder &p_order)
 {
-  if (entry_count_ == kBatchEntriesMax || bytes_.size() - used_bytes_ < kEntrySizeMax)
+  if (entry_count_ == kBatchEntriesMax)
   {
     return false;
   }
-  PutField(bytes_, used_bytes_, p_session);
-  used_bytes_ += std::visit(
-      [this](const auto &p_message)
-      { return wire::Encode(p_message, std::span{bytes_}.subspan(used_bytes_)); }, p_order);
-  ++entry_count_;
-  return true;
+  return std::visit(
+      [this, p_session]<typename M>(const M &p_message)
+      {
+        if (bytes_.size() - used_bytes_ < sizeof(SessionId) + wire::kFrameSize<M>)
+        {
+          return false;
+        }
+        PutField(bytes_, used_bytes_, p_session);
+        used_bytes_ += wire::Encode(p_message, std::span{bytes_}.subspan(used_bytes_));
+        ++entry_count_;
+        return true;
+      },
+      p_order);
 }
 
 std::span<const std::byte> OrderBatch::Bytes() const

@@ -164,7 +164,8 @@ private:
   template <typename M> void SendToSession(SessionId p_session, const M &p_message);
 
   // Encodes p_message; returns false if it does not fit even after a write.
-  template <typename M> [[nodiscard]] bool Append(std::uint32_t p_index, std::uint64_t p_seq, const M &p_message);
+  template <typename M> [[nodiscard]] bool Append(std::uint32_t p_index, std::uint64_t p_seq,
+                                                  const M &p_message);
 
   // Epoll: writes what the kernel takes and waits for EPOLLOUT for the rest.
   // io_uring: submits a send of the unsent bytes unless one is in flight.

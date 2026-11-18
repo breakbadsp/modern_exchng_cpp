@@ -442,40 +442,11 @@ bool Book::Restore(std::span<const RestingOrder> p_orders, std::span<const Order
   }
   fill_count_ = 0;
   free_count_ = 0;
-  bool saw_ask = false;
   for (const RestingOrder &order : p_orders)
   {
-    if (order.slot_ >= pool_size_ || order.quantity_ == Quantity{} ||
-        (order.side_ != Side::Buy && order.side_ != Side::Sell) ||
-        (saw_ask && order.side_ == Side::Buy))
+    if (!RestoreOrder(order))
     {
       return false;
-    }
-    OrderNode &node = pool_[order.slot_];
-    if (node.quantity_ != Quantity{})
-    {
-      return false;
-    }
-    saw_ask = order.side_ == Side::Sell;
-    PriceLadder &levels = Levels(order.side_);
-    if (!levels.empty() && (order.side_ == Side::Buy ? order.price_ < levels.back().price_
-                                                     : order.price_ > levels.back().price_))
-    {
-      return false;
-    }
-    node = OrderNode{.price_ = order.price_, .quantity_ = order.quantity_, .side_ = order.side_};
-    if (!levels.empty() && levels.back().price_ == order.price_)
-    {
-      AppendToLevel(pool_.get(), pool_size_, levels.back(), order.slot_, order.quantity_);
-    }
-    else
-    {
-      if (levels.size() == levels.Capacity())
-      {
-        return false;
-      }
-      levels.Insert(static_cast<std::uint32_t>(levels.size()),
-                    PriceLevel{order.price_, order.slot_, order.slot_, 1, order.quantity_.units_});
     }
   }
   if (!bids_.empty() && !asks_.empty() && bids_.back().price_ >= asks_.back().price_)
@@ -496,6 +467,44 @@ bool Book::Restore(std::span<const RestingOrder> p_orders, std::span<const Order
   for (const OrderId slot : p_free_slots)
   {
     pool_[slot].prev_ = kInvalidOrderId;
+  }
+  return true;
+}
+
+bool Book::RestoreOrder(const RestingOrder &p_order)
+{
+  if (p_order.slot_ >= pool_size_ || p_order.quantity_ == Quantity{} ||
+      (p_order.side_ != Side::Buy && p_order.side_ != Side::Sell) ||
+      (!asks_.empty() && p_order.side_ == Side::Buy))
+  {
+    return false;
+  }
+  OrderNode &node = pool_[p_order.slot_];
+  if (node.quantity_ != Quantity{})
+  {
+    return false;
+  }
+  PriceLadder &levels = Levels(p_order.side_);
+  if (!levels.empty() && (p_order.side_ == Side::Buy ? p_order.price_ < levels.back().price_
+                                                     : p_order.price_ > levels.back().price_))
+  {
+    return false;
+  }
+  node =
+      OrderNode{.price_ = p_order.price_, .quantity_ = p_order.quantity_, .side_ = p_order.side_};
+  if (!levels.empty() && levels.back().price_ == p_order.price_)
+  {
+    AppendToLevel(pool_.get(), pool_size_, levels.back(), p_order.slot_, p_order.quantity_);
+  }
+  else
+  {
+    if (levels.size() == levels.Capacity())
+    {
+      return false;
+    }
+    levels.Insert(
+        static_cast<std::uint32_t>(levels.size()),
+        PriceLevel{p_order.price_, p_order.slot_, p_order.slot_, 1, p_order.quantity_.units_});
   }
   return true;
 }
@@ -589,7 +598,8 @@ OrderId Book::RestAtLevel(Side p_side, Price p_price, Quantity p_quantity, std::
   node.quantity_ = p_quantity;
   node.side_ = p_side;
   // Construction and ReleaseSlot clear the links of a free slot.
-  contract_assert(node.prev_ == kInvalidOrderId && node.next_ == kInvalidOrderId);
+  contract_assert(node.prev_ == kInvalidOrderId);
+  contract_assert(node.next_ == kInvalidOrderId);
 
   if (level_exists)
   {
