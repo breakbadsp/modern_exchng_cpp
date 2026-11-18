@@ -847,7 +847,7 @@ void Gateway::StopUring()
       // A successful accept transfers a descriptor even after shutdown starts.
       if (OpOf(io_uring_cqe_get_data64(cqe)) == Op::Accept && cqe->res >= 0)
       {
-        UniqueFd accepted{cqe->res};
+        ::close(cqe->res);
       }
       if (IsFinal(io_uring_cqe_get_data64(cqe), cqe->flags))
       {
