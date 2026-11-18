@@ -16,3 +16,7 @@ principles. The reference copy is [TigerStyle](../prep/TIGER_STYLE.md).
   Do not repeat checks in private helpers without a reason.
 - Build contracts with GCC 16 or later and `-fcontracts`. The `bench_book`
   target ignores contract evaluation to measure the book without checks.
+
+CI uses Universal Ctags to check the 70-line limit for C++ functions and checks
+all C++ source lines against the 100-column limit. Install Universal Ctags before
+configuring to run the same checks locally with `ctest --preset ninja -R tiger_style`.

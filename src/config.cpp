@@ -11,7 +11,6 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <iterator>
 #include <limits>
 #include <netinet/in.h>
 #include <optional>
@@ -205,6 +204,19 @@ template <typename T>
 [[nodiscard]] Status ParseReplica(ParseState &p_state, Fields p_fields)
 {
   const std::string_view address = p_fields[1];
+  const auto colon = address.find(':');
+  in_addr parsed{};
+  if (colon == std::string_view::npos ||
+      ::inet_pton(AF_INET, std::string{address.substr(0, colon)}.c_str(), &parsed) != 1)
+  {
+    return std::unexpected("replica address must be an IPv4 address and port");
+  }
+  const auto port = ParseInteger<std::uint16_t>("replica port", address.substr(colon + 1), 1);
+  if (!port)
+  {
+    return std::unexpected(port.error());
+  }
+  const std::string endpoint = std::format("{}:{}", address.substr(0, colon), *port);
   const auto gateway_port = ParseInteger<std::uint16_t>("gateway_port", p_fields[2], 1);
   if (!gateway_port)
   {
@@ -215,12 +227,12 @@ template <typename T>
   {
     return std::unexpected(std::format("more than {} replica records", kMaxReplicas));
   }
-  if (std::ranges::find(replicas, address, &ReplicaConfig::replication_address_) != replicas.end())
+  if (std::ranges::find(replicas, endpoint, &ReplicaConfig::replication_address_) != replicas.end())
   {
     return std::unexpected(std::format("duplicate replica address '{}'", address));
   }
   replicas.push_back(
-      ReplicaConfig{.replication_address_ = std::string{address}, .gateway_port_ = *gateway_port});
+      ReplicaConfig{.replication_address_ = endpoint, .gateway_port_ = *gateway_port});
   return {};
 }
 
@@ -392,6 +404,10 @@ constexpr std::array kRecordKinds{
 
 std::expected<Config, ConfigError> ParseConfig(std::string_view p_text)
 {
+  if (p_text.size() > kMaxConfigBytes)
+  {
+    return std::unexpected(ConfigError{.reason_ = "configuration exceeds the byte limit"});
+  }
   ParseState state{};
   std::string_view rest = p_text;
   while (!rest.empty())
@@ -400,6 +416,10 @@ std::expected<Config, ConfigError> ParseConfig(std::string_view p_text)
     const std::string_view line = rest.substr(0, end);
     rest = end == std::string_view::npos ? std::string_view{} : rest.substr(end + 1);
     ++state.line_;
+    if (line.contains('\0'))
+    {
+      return std::unexpected(ConfigError{.line_ = state.line_, .reason_ = "unexpected null byte"});
+    }
 
     std::array<std::string_view, kMaxFields> fields{};
     const std::size_t count = Split(line, fields);
@@ -425,8 +445,11 @@ std::expected<Config, ConfigError> LoadConfig(const std::filesystem::path &p_pat
     return std::unexpected(
         ConfigError{.line_ = 0, .reason_ = std::format("cannot open '{}'", p_path.string())});
   }
-  const std::string text{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-  if (file.bad())
+  // Read one extra byte to distinguish an exact fit from an oversized stream.
+  std::string text(kMaxConfigBytes + 1, '\0');
+  file.read(text.data(), static_cast<std::streamsize>(text.size()));
+  text.resize(static_cast<std::size_t>(file.gcount()));
+  if (file.bad() || (file.fail() && !file.eof()))
   {
     return std::unexpected(
         ConfigError{.line_ = 0, .reason_ = std::format("cannot read '{}'", p_path.string())});

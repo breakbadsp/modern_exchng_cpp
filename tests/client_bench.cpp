@@ -222,6 +222,129 @@ void Report(std::string_view p_name, std::vector<std::int64_t> &p_samples)
   return static_cast<double>(p_time.tv_sec) * 1e9 + static_cast<double>(p_time.tv_usec) * 1000;
 }
 
+using Samples = std::array<std::vector<std::int64_t>, kSteps>;
+struct Timing
+{
+  double elapsed_ns_;
+  double cpu_ns_;
+};
+Timing Measure(ClientFlow &p_flow, std::uint64_t p_cycles, Samples &p_samples)
+{
+  const auto cpu_start = std::clock();
+  const auto start = Clock::now();
+  for (std::uint64_t cycle = 0; cycle < p_cycles; ++cycle)
+  {
+    for (std::size_t step = 0; step < kSteps; ++step)
+    {
+      if (!p_samples.front().empty())
+      {
+        const auto before = Clock::now();
+        p_flow.Step(step, cycle);
+        const auto after = Clock::now();
+        p_samples[step][cycle] =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(after - before).count();
+      }
+      else
+      {
+        p_flow.Step(step, cycle);
+      }
+    }
+  }
+  const double elapsed_ns = std::chrono::duration<double, std::nano>(Clock::now() - start).count();
+  const double cpu_ns = static_cast<double>(std::clock() - cpu_start) * 1e9 / CLOCKS_PER_SEC;
+  return {elapsed_ns, cpu_ns};
+}
+
+void WarmUp(ClientFlow &p_flow)
+{
+  for (std::uint64_t cycle = 0; cycle < kWarmupCycles; ++cycle)
+  {
+    for (std::size_t step = 0; step < kSteps; ++step)
+    {
+      p_flow.Step(step, cycle);
+    }
+  }
+}
+
+void ReportLatency(Samples &p_samples, std::size_t p_cycles)
+{
+  for (std::size_t step = 0; step < kSteps; ++step)
+  {
+    Report(kNames[step], p_samples[step]);
+  }
+  std::vector<std::int64_t> timer_samples(p_cycles);
+  for (auto &value : timer_samples)
+  {
+    const auto before = Clock::now();
+    value = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - before).count();
+  }
+  Report("timer_pair", timer_samples);
+}
+
+int RunFlow(std::string_view p_mode, std::uint64_t p_cycles, std::uint64_t p_levels,
+            std::optional<PerfControl> p_perf)
+{
+  ClientFlow flow(static_cast<std::uint32_t>(p_levels));
+  WarmUp(flow);
+  Samples samples;
+  if ((p_mode == "latency"))
+  {
+    for (auto &values : samples)
+    {
+      values.resize(p_cycles);
+    }
+  }
+  const auto usage_start = ThreadUsage();
+  if (!usage_start)
+  {
+    std::println(stderr, "Cannot read thread CPU usage");
+    return 1;
+  }
+  // Wait for perf to acknowledge the boundary before the measured requests.
+  if (p_perf.has_value())
+  {
+    const auto enabled = ControlPerf(*p_perf, "enable\n");
+    if (!enabled)
+    {
+      std::println(stderr, "{}", enabled.error());
+      return 1;
+    }
+  }
+  const auto [elapsed_ns, cpu_ns] = Measure(flow, p_cycles, samples);
+  if (p_perf.has_value())
+  {
+    const auto disabled = ControlPerf(*p_perf, "disable\n");
+    if (!disabled)
+    {
+      std::println(stderr, "{}", disabled.error());
+      return 1;
+    }
+  }
+  const auto usage_end = ThreadUsage();
+  if (!usage_end)
+  {
+    std::println(stderr, "Cannot read thread CPU usage");
+    return 1;
+  }
+  const double user_cpu_ns = CpuTimeNs(usage_end->ru_utime) - CpuTimeNs(usage_start->ru_utime);
+  const double system_cpu_ns = CpuTimeNs(usage_end->ru_stime) - CpuTimeNs(usage_start->ru_stime);
+  if (!flow.Valid(p_cycles + kWarmupCycles))
+  {
+    std::println(stderr, "Flow validation failed");
+    return 1;
+  }
+  const auto operations = static_cast<double>(p_cycles * kSteps);
+  std::println("summary,{},levels,{},operations,{},wall_ns_per_op,{:.3f},cpu_ns_per_op,{:.3f},"
+               "user_cpu_ns,{:.0f},system_cpu_ns,{:.0f},checksum,{}",
+               p_mode, p_levels, p_cycles * kSteps, elapsed_ns / operations, cpu_ns / operations,
+               user_cpu_ns, system_cpu_ns, flow.Checksum());
+  if ((p_mode == "latency"))
+  {
+    ReportLatency(samples, p_cycles);
+  }
+  return 0;
+}
+
 int Run(std::span<char *> p_args)
 {
   const std::optional<std::uint64_t> cycles =
@@ -246,102 +369,7 @@ int Run(std::span<char *> p_args)
     std::println(stderr, "perf mode requires the scripts/perf_control.py control channel");
     return 2;
   }
-  ClientFlow flow(static_cast<std::uint32_t>(*levels));
-  for (std::uint64_t cycle = 0; cycle < kWarmupCycles; ++cycle)
-  {
-    for (std::size_t step = 0; step < kSteps; ++step)
-    {
-      flow.Step(step, cycle);
-    }
-  }
-  std::array<std::vector<std::int64_t>, kSteps> samples;
-  if (measure_latency)
-  {
-    for (auto &values : samples)
-    {
-      values.resize(*cycles);
-    }
-  }
-  const auto usage_start = ThreadUsage();
-  if (!usage_start)
-  {
-    std::println(stderr, "Cannot read thread CPU usage");
-    return 1;
-  }
-  // Wait for perf to acknowledge the boundary before the measured requests.
-  if (measure_perf)
-  {
-    const auto enabled = ControlPerf(*perf_control, "enable\n");
-    if (!enabled)
-    {
-      std::println(stderr, "{}", enabled.error());
-      return 1;
-    }
-  }
-  const auto cpu_start = std::clock();
-  const auto start = Clock::now();
-  for (std::uint64_t cycle = 0; cycle < *cycles; ++cycle)
-  {
-    for (std::size_t step = 0; step < kSteps; ++step)
-    {
-      if (measure_latency)
-      {
-        const auto before = Clock::now();
-        flow.Step(step, cycle);
-        const auto after = Clock::now();
-        samples[step][cycle] =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(after - before).count();
-      }
-      else
-      {
-        flow.Step(step, cycle);
-      }
-    }
-  }
-  const double elapsed_ns = std::chrono::duration<double, std::nano>(Clock::now() - start).count();
-  const double cpu_ns = static_cast<double>(std::clock() - cpu_start) * 1e9 / CLOCKS_PER_SEC;
-  if (measure_perf)
-  {
-    const auto disabled = ControlPerf(*perf_control, "disable\n");
-    if (!disabled)
-    {
-      std::println(stderr, "{}", disabled.error());
-      return 1;
-    }
-  }
-  const auto usage_end = ThreadUsage();
-  if (!usage_end)
-  {
-    std::println(stderr, "Cannot read thread CPU usage");
-    return 1;
-  }
-  const double user_cpu_ns = CpuTimeNs(usage_end->ru_utime) - CpuTimeNs(usage_start->ru_utime);
-  const double system_cpu_ns = CpuTimeNs(usage_end->ru_stime) - CpuTimeNs(usage_start->ru_stime);
-  if (!flow.Valid(*cycles + kWarmupCycles))
-  {
-    std::println(stderr, "Flow validation failed");
-    return 1;
-  }
-  const auto operations = static_cast<double>(*cycles * kSteps);
-  std::println("summary,{},levels,{},operations,{},wall_ns_per_op,{:.3f},cpu_ns_per_op,{:.3f},"
-               "user_cpu_ns,{:.0f},system_cpu_ns,{:.0f},checksum,{}",
-               mode, *levels, *cycles * kSteps, elapsed_ns / operations, cpu_ns / operations,
-               user_cpu_ns, system_cpu_ns, flow.Checksum());
-  if (measure_latency)
-  {
-    for (std::size_t step = 0; step < kSteps; ++step)
-    {
-      Report(kNames[step], samples[step]);
-    }
-    std::vector<std::int64_t> timer_samples(*cycles);
-    for (auto &value : timer_samples)
-    {
-      const auto before = Clock::now();
-      value = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - before).count();
-    }
-    Report("timer_pair", timer_samples);
-  }
-  return 0;
+  return RunFlow(mode, *cycles, *levels, perf_control);
 }
 } // namespace
 } // namespace mex

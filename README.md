@@ -58,7 +58,7 @@ Configure fails if CMake is not using Ninja (`-G Ninja` or the preset above), if
 
 ## Run the exchange
 
-`mex_exchange` reads one config file ([`config/example.cfg`](config/example.cfg) documents the syntax), starts one pinned thread per engine and a gateway thread, and stops on SIGINT or SIGTERM. A core that cannot be pinned is a warning, not an error.
+`mex_exchange` reads one config file ([`config/example.cfg`](config/example.cfg) documents the syntax), starts one pinned thread per engine and a gateway thread, and stops on SIGINT or SIGTERM. A core that cannot be pinned is a warning, not an error. Configuration input has a 1 MiB limit, including whitespace and comments.
 
 ```bash
 ./build/mex_exchange config/example.cfg              # epoll client I/O (default)

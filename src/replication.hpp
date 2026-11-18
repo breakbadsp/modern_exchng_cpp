@@ -55,8 +55,10 @@ private:
 
 // The largest number of entries that one operation applies. The engine op
 // number of an entry is (operation number, entry index), packed in 64 bits.
-constexpr std::uint32_t kBatchEntriesMax = 0xFFFF;
 constexpr std::uint32_t kBatchEntryIndexBits = 16;
+constexpr std::uint32_t kBatchEntriesMax = (std::uint32_t{1} << kBatchEntryIndexBits) - 1;
+constexpr std::size_t kBatchEntryBytesMax =
+    sizeof(SessionId) + wire::MaxFrameSize<ClientOrder>::kValue;
 
 // The reply of one operation: the number of entries that it applied (u32).
 constexpr std::size_t kBatchReplyBytes = sizeof(std::uint32_t);
@@ -143,7 +145,8 @@ template <ReplicationClient TClient> class BasicReplicationBridge final
 public:
   // The bridge is the consumer of each inbound queue.
   BasicReplicationBridge(TClient p_client, std::span<const EngineQueues> p_queues,
-                         std::size_t p_batch_bytes_max);
+                         std::size_t p_batch_bytes_max)
+      pre(p_batch_bytes_max >= kBatchEntryBytesMax);
   BasicReplicationBridge(const BasicReplicationBridge &) = delete;
   BasicReplicationBridge &operator=(const BasicReplicationBridge &) = delete;
   BasicReplicationBridge(BasicReplicationBridge &&) = delete;

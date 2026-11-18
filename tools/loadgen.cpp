@@ -15,6 +15,7 @@
 #include <cstring>
 #include <expected>
 #include <format>
+#include <limits>
 #include <memory>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -65,6 +66,8 @@ constexpr std::uint32_t kMaxQty = 100;
 // Orders the sender still treats as live. The oldest is cancelled when full,
 // so each book holds at most this many of our orders.
 constexpr std::size_t kMaxLiveOrders = 1024;
+// Two 64-bit timestamp arrays use about 256 MiB at this limit.
+constexpr std::uint64_t kMaxOrders = 1ULL << 24;
 constexpr std::uint64_t kSeed = 42;
 
 constexpr std::string_view kUsage = R"(usage: mex_loadgen [options]
@@ -73,7 +76,7 @@ constexpr std::string_view kUsage = R"(usage: mex_loadgen [options]
   --session <name>     session name (default alice)
   --token <token>      session token (default alice-secret)
   --symbols <a,b,...>  symbol ids to trade (default 1)
-  --orders <n>         operations to send: NewOrder, Cancel, and Replace (default 100000)
+  --orders <n>         operations to send, 1..16777216 (default 100000)
   --rate <n>           operations per second; 0 sends as fast as the window allows (default 0)
   --window <n>         operations sent without a final report, at most (default 4096)
   --mid <ticks>        mid price; keep mid +/- 22 ticks inside each symbol's band (default 10000))";
@@ -215,10 +218,19 @@ ApplyOption(Options &p_options, std::string_view p_name, std::string_view p_valu
   {
     return std::unexpected("--orders and --window must be at least 1");
   }
-  if (options.mid_ <= kMaxDepthTicks + kReplaceStepTicks)
+  if (options.orders_ > kMaxOrders)
   {
-    return std::unexpected(
-        std::format("--mid must be above {}", kMaxDepthTicks + kReplaceStepTicks));
+    return std::unexpected(std::format("--orders must be at most {}", kMaxOrders));
+  }
+  if (options.port_ == 0)
+  {
+    return std::unexpected("--port must be at least 1");
+  }
+  constexpr std::int64_t kPriceMargin = kMaxDepthTicks + kReplaceStepTicks;
+  constexpr std::int64_t kHighestMid = std::numeric_limits<std::int64_t>::max() - kPriceMargin;
+  if (options.mid_ <= kPriceMargin || options.mid_ > kHighestMid)
+  {
+    return std::unexpected(std::format("--mid must be in [{}, {}]", kPriceMargin + 1, kHighestMid));
   }
   return options;
 }
@@ -242,12 +254,6 @@ ApplyOption(Options &p_options, std::string_view p_name, std::string_view p_valu
   {
     return std::unexpected(std::format("bad IPv4 address {}", p_options.host_));
   }
-  // The socket API takes every address family through sockaddr.
-  if (::connect(fd.Get(), reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0)
-  {
-    return std::unexpected(
-        SystemError(std::format("connect {}:{}", p_options.host_, p_options.port_)));
-  }
   const int one = 1;
   if (::setsockopt(fd.Get(), IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0 ||
       ::setsockopt(fd.Get(), SOL_SOCKET, SO_RCVTIMEO, &kSocketTimeout, sizeof(kSocketTimeout)) !=
@@ -255,6 +261,12 @@ ApplyOption(Options &p_options, std::string_view p_name, std::string_view p_valu
       ::setsockopt(fd.Get(), SOL_SOCKET, SO_SNDTIMEO, &kSocketTimeout, sizeof(kSocketTimeout)) != 0)
   {
     return std::unexpected(SystemError("setsockopt"));
+  }
+  // The socket API takes every address family through sockaddr.
+  if (::connect(fd.Get(), reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0)
+  {
+    return std::unexpected(
+        SystemError(std::format("connect {}:{}", p_options.host_, p_options.port_)));
   }
   return fd;
 }
@@ -488,7 +500,10 @@ struct SenderResult
 class OrderFlow final
 {
 public:
-  explicit OrderFlow(const Options &p_options) : options_{p_options} {}
+  explicit OrderFlow(const Options &p_options)
+      : symbols_{p_options.symbols_}, mid_{p_options.mid_}, symbol_{0, symbols_.size() - 1}
+  {
+  }
 
   // Appends the next operation to p_writer.
   [[nodiscard]] std::expected<void, std::string> Next(FrameWriter &p_writer, Shared &p_shared,
@@ -532,8 +547,7 @@ private:
 
   [[nodiscard]] Price Clamp(std::int64_t p_ticks) const
   {
-    return Price{
-        std::clamp(p_ticks, options_.mid_ - kMaxDepthTicks, options_.mid_ + kMaxDepthTicks)};
+    return Price{std::clamp(p_ticks, mid_ - kMaxDepthTicks, mid_ + kMaxDepthTicks)};
   }
 
   [[nodiscard]] wire::NewOrder NextNewOrder()
@@ -542,10 +556,10 @@ private:
     const std::int64_t away = depth_(rng_); // negative crosses mid
     return {.request_number_ = NextRequestNumber(),
             .client_order_id_ = ++last_client_order_id_,
-            .symbol_id_ = options_.symbols_[symbol_(rng_)],
+            .symbol_id_ = symbols_[symbol_(rng_)],
             .side_ = side,
             .type_ = wire::OrderType::Limit,
-            .price_ = Clamp(side == Side::Buy ? options_.mid_ - away : options_.mid_ + away),
+            .price_ = Clamp(side == Side::Buy ? mid_ - away : mid_ + away),
             .qty_ = Quantity{qty_(rng_)}};
   }
 
@@ -561,14 +575,15 @@ private:
             .new_total_qty_ = Quantity{qty_(rng_)}};
   }
 
-  const Options &options_;
+  std::span<const wire::SymbolId> symbols_;
+  std::int64_t mid_;
   std::mt19937_64 rng_{kSeed};
   std::uniform_int_distribution<std::uint32_t> percent_{0, 99};
   std::uniform_int_distribution<std::uint32_t> coin_{0, 1};
   std::uniform_int_distribution<std::int64_t> depth_{-kCrossTicks, kMaxDepthTicks};
   std::uniform_int_distribution<std::int64_t> step_{-kReplaceStepTicks, kReplaceStepTicks};
   std::uniform_int_distribution<std::uint32_t> qty_{1, kMaxQty};
-  std::uniform_int_distribution<std::size_t> symbol_{0, options_.symbols_.size() - 1};
+  std::uniform_int_distribution<std::size_t> symbol_;
   std::array<LiveOrder, kMaxLiveOrders> live_{};
   std::size_t live_begin_ = 0;
   std::size_t live_count_ = 0;

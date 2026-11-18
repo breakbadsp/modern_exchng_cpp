@@ -142,6 +142,62 @@ void operator delete[](void *p_memory, std::align_val_t p_alignment,
   ::operator delete(p_memory, p_alignment);
 }
 
+namespace
+{
+std::uint64_t Next(std::uint64_t &p_state)
+{
+  p_state ^= p_state << 7U;
+  p_state ^= p_state >> 9U;
+  p_state ^= p_state << 8U;
+  return p_state;
+}
+
+void RemoveFilled(std::vector<mex::OrderId> &p_live, std::span<const mex::Fill> p_fills)
+{
+  // Makers removed by this submit are no longer live. Drop them without
+  // allocating: swap-remove by value.
+  for (const mex::Fill &fill : p_fills)
+  {
+    if (!fill.maker_removed_)
+    {
+      continue;
+    }
+    for (std::size_t j = 0; j < p_live.size(); ++j)
+    {
+      // The new resting order (if any) may carry the same id as a removed
+      // maker, and it is not in `p_live` yet, so any match here is the maker.
+      if (p_live[j] == fill.maker_id_)
+      {
+        p_live[j] = p_live.back();
+        p_live.pop_back();
+        break;
+      }
+    }
+  }
+}
+
+mex::SubmitResult Submit(mex::Book &p_book, std::uint64_t &p_state, std::uint64_t p_pick,
+                         std::uint32_t p_levels)
+{
+  const mex::Side side = (Next(p_state) & 1U) == 0U ? mex::Side::Buy : mex::Side::Sell;
+  mex::SubmitResult result;
+  if ((p_pick % 11U) == 0U)
+  {
+    result = p_book.SubmitMarketOrder(
+        side, mex::Quantity{static_cast<std::uint32_t>(1 + Next(p_state) % 4U)});
+  }
+  else
+  {
+    // Prices 0..63 for both sides, so buys and sells cross regularly.
+    const mex::Price price{static_cast<std::int64_t>(Next(p_state) % p_levels)};
+    result = p_book.SubmitLimitOrder(
+        side, price, mex::Quantity{static_cast<std::uint32_t>(1 + Next(p_state) % 4U)});
+  }
+
+  return result;
+}
+} // namespace
+
 TEST(AllocCount, TwoMillionMixedOpsDoNotCallOperatorNew)
 {
   constexpr std::uint32_t kCapacity = 4096;
@@ -153,13 +209,6 @@ TEST(AllocCount, TwoMillionMixedOpsDoNotCallOperatorNew)
   live.reserve(kCapacity);
 
   std::uint64_t state = 0xcafef00d1234ULL;
-  auto next = [&state]()
-  {
-    state ^= state << 7U;
-    state ^= state >> 9U;
-    state ^= state << 8U;
-    return state;
-  };
 
   // Tracking which ids are live is the test's job, not the book's: a fill with
   // maker_removed_ frees a slot, and Rest may reuse that id in the same submit.
@@ -172,11 +221,11 @@ TEST(AllocCount, TwoMillionMixedOpsDoNotCallOperatorNew)
 
   for (std::uint32_t i = 0; i < kOps; ++i)
   {
-    const std::uint64_t pick = next();
+    const std::uint64_t pick = Next(state);
     const bool cancel = !live.empty() && (pick % 5U) == 0U;
     if (cancel)
     {
-      const std::size_t index = static_cast<std::size_t>(next() % live.size());
+      const std::size_t index = static_cast<std::size_t>(Next(state) % live.size());
       if (!book.CancelOrder(live[index]))
       {
         g_count_news.store(false, std::memory_order_relaxed);
@@ -187,46 +236,12 @@ TEST(AllocCount, TwoMillionMixedOpsDoNotCallOperatorNew)
       continue;
     }
 
-    const mex::Side side = (next() & 1U) == 0U ? mex::Side::Buy : mex::Side::Sell;
-    mex::SubmitResult result;
-    if ((pick % 11U) == 0U)
-    {
-      result =
-          book.SubmitMarketOrder(side, mex::Quantity{static_cast<std::uint32_t>(1 + next() % 4U)});
-    }
-    else
-    {
-      // Prices 0..63 for both sides, so buys and sells cross regularly.
-      const mex::Price price{static_cast<std::int64_t>(next() % kLevels)};
-      result = book.SubmitLimitOrder(side, price,
-                                     mex::Quantity{static_cast<std::uint32_t>(1 + next() % 4U)});
-    }
-
+    const auto result = Submit(book, state, pick, kLevels);
     const std::size_t fills = book.Fills().size();
     fills_seen += fills;
     crossing_submits += fills > 0 ? 1U : 0U;
 
-    // Makers removed by this submit are no longer live. Drop them without
-    // allocating: swap-remove by value.
-    for (const mex::Fill &fill : book.Fills())
-    {
-      if (!fill.maker_removed_)
-      {
-        continue;
-      }
-      for (std::size_t j = 0; j < live.size(); ++j)
-      {
-        // The new resting order (if any) may carry the same id as a removed
-        // maker, and it is not in `live` yet, so any match here is the maker.
-        if (live[j] == fill.maker_id_)
-        {
-          live[j] = live.back();
-          live.pop_back();
-          break;
-        }
-      }
-    }
-
+    RemoveFilled(live, book.Fills());
     if (result.order_id_ != mex::kInvalidOrderId)
     {
       live.push_back(result.order_id_);
@@ -253,13 +268,7 @@ TEST(AllocCount, EngineCommandsDoNotCallOperatorNew)
                      outbound};
 
   std::uint64_t state = 0x1234cafef00dULL;
-  auto next = [&state]()
-  {
-    state ^= state << 7U;
-    state ^= state >> 9U;
-    state ^= state << 8U;
-    return state;
-  };
+
   std::uint64_t fills = 0;
 
   g_new_calls.store(0, std::memory_order_relaxed);
@@ -269,20 +278,20 @@ TEST(AllocCount, EngineCommandsDoNotCallOperatorNew)
   {
     // Small id space per session, so duplicates, unknown ids, and replaces all occur.
     // One request in 16 repeats the number of the command before it.
-    const mex::wire::RequestNumber request{i + (next() % 16U == 0U ? 0U : 1U)};
+    const mex::wire::RequestNumber request{i + (Next(state) % 16U == 0U ? 0U : 1U)};
     mex::Command command{.op_number_ = mex::OpNumber{std::uint64_t{i} + 1},
-                         .session_id_ = static_cast<mex::SessionId>(next() % kSessionCount)};
-    const mex::wire::ClientOrderId id = next() % 128U;
-    const mex::Price price{static_cast<std::int64_t>(100 + next() % 16U)};
-    const mex::Quantity qty{static_cast<std::uint32_t>(1 + next() % 8U)};
-    const std::uint64_t pick = next() % 10U;
+                         .session_id_ = static_cast<mex::SessionId>(Next(state) % kSessionCount)};
+    const mex::wire::ClientOrderId id = Next(state) % 128U;
+    const mex::Price price{static_cast<std::int64_t>(100 + Next(state) % 16U)};
+    const mex::Quantity qty{static_cast<std::uint32_t>(1 + Next(state) % 8U)};
+    const std::uint64_t pick = Next(state) % 10U;
     if (pick < 6U)
     {
       command.order_ = mex::wire::NewOrder{
           .request_number_ = request,
           .client_order_id_ = id,
           .symbol_id_ = 1,
-          .side_ = (next() & 1U) == 0U ? mex::Side::Buy : mex::Side::Sell,
+          .side_ = (Next(state) & 1U) == 0U ? mex::Side::Buy : mex::Side::Sell,
           .type_ = pick == 0U ? mex::wire::OrderType::Market : mex::wire::OrderType::Limit,
           .price_ = price,
           .qty_ = qty};

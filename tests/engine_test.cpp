@@ -1215,6 +1215,164 @@ std::optional<Reason> ReasonOf(const Report &p_report)
       p_report.report_);
 }
 
+class Lifecycle final
+{
+public:
+  void Step(std::uint32_t p_op)
+  {
+    // Few ids and prices, so that ids are used again and orders cross often.
+    const OrderKey key{.slot_ = Below(2), .session_ = Below(2) == 0 ? kA : kB, .id_ = 1 + Below(6)};
+    const Side side = Below(2) == 0 ? Side::Buy : Side::Sell;
+    const std::int64_t price = 98 + Below(5);
+    // Half of the commands are NewOrder (one in ten of them a market order), a
+    // quarter Cancel, and a quarter Replace.
+    const std::uint32_t roll = Below(100);
+    const CommandKind kind = roll < 50   ? CommandKind::NewOrder
+                             : roll < 75 ? CommandKind::Cancel
+                                         : CommandKind::Replace;
+    Command command{};
+    switch (kind)
+    {
+    case CommandKind::NewOrder:
+      command = roll < 5 ? Market(key.session_, key.id_, side, 1 + Below(5), key.slot_)
+                         : Limit(key.session_, key.id_, side, price, 1 + Below(5), key.slot_);
+      break;
+    case CommandKind::Cancel:
+      command = CancelOf(key.session_, key.id_, key.slot_);
+      break;
+    case CommandKind::Replace:
+      command = ReplaceOf(key.session_, key.id_, price, 1 + Below(8), key.slot_);
+      break;
+    }
+    const auto found = resting_.find(key);
+    const bool was_resting = found != resting_.end();
+    const RestingOrder before = was_resting ? found->second : RestingOrder{};
+
+    const Reports reports = h_.Send(command);
+
+    ASSERT_FALSE(reports.empty()) << "op " << p_op;
+    ASSERT_NO_FATAL_FAILURE(CheckFills(reports, key, p_op));
+    ASSERT_NO_FATAL_FAILURE(CheckFinal(reports, key, before, price, p_op));
+    const Report &last = reports.back();
+    const MsgType type = TypeOf(last);
+    const Outcome outcome{
+        .type_ = type, .reason_ = ReasonOf(last), .rests_ = resting_.contains(key)};
+    const std::vector<Outcome> allowed = OutcomesOf(kind, was_resting);
+    ASSERT_TRUE(std::ranges::find(allowed, outcome) != allowed.end())
+        << "op " << p_op << ": " << testing::PrintToString(last)
+        << " is not an end of command kind " << static_cast<int>(kind)
+        << " for an order with resting = " << was_resting;
+    ++seen_[{kind, was_resting, outcome}];
+  }
+
+  void CheckCoverage()
+  {
+    // The run must meet every row of the lifecycle, or it proves less than it says.
+    for (const CommandKind kind :
+         {CommandKind::NewOrder, CommandKind::Cancel, CommandKind::Replace})
+    {
+      for (const bool was_resting : {false, true})
+      {
+        for (const Outcome &outcome : OutcomesOf(kind, was_resting))
+        {
+          const std::uint32_t count = seen_[{kind, was_resting, outcome}];
+          EXPECT_GT(count, 0U) << "kind " << static_cast<int>(kind) << " resting " << was_resting
+                               << " type " << static_cast<int>(outcome.type_) << " rests "
+                               << outcome.rests_;
+        }
+      }
+    }
+    EXPECT_GT(reduced_in_place_, 0U);
+    EXPECT_GT(moved_, 0U);
+    EXPECT_GT(makers_partly_filled_, 0U);
+    EXPECT_GT(makers_filled_, 0U);
+  }
+
+private:
+  void CheckFills(const Reports &p_reports, const OrderKey &p_key, std::uint32_t p_op)
+  {
+    for (std::size_t i = 0; i + 1 < p_reports.size(); ++i)
+    {
+      const auto *fill = std::get_if<mex::wire::Fill>(&p_reports[i].report_);
+      ASSERT_NE(fill, nullptr) << "op " << p_op << ": only fills come before the final report";
+      const OrderKey fill_key = KeyOf(p_reports[i]);
+      if (fill->liquidity_ == Liquidity::Taker)
+      {
+        ASSERT_EQ(fill_key, p_key) << "op " << p_op;
+        continue;
+      }
+      ASSERT_NE(fill_key, p_key) << "op " << p_op << ": an order filled itself";
+      const auto maker = resting_.find(fill_key);
+      ASSERT_TRUE(maker != resting_.end()) << "op " << p_op << ": a fill of an order that ended";
+      ASSERT_EQ(fill->qty_ + fill->leaves_, maker->second.leaves_) << "op " << p_op;
+      if (fill->leaves_ == Quantity{})
+      {
+        resting_.erase(maker);
+        ++makers_filled_;
+      }
+      else
+      {
+        maker->second.leaves_ = fill->leaves_;
+        ++makers_partly_filled_;
+      }
+    }
+  }
+  void CheckFinal(const Reports &p_reports, const OrderKey &p_key, RestingOrder p_before,
+                  std::int64_t p_price, std::uint32_t p_op)
+  {
+    const Report &last = p_reports.back();
+    const MsgType type = TypeOf(last);
+    ASSERT_EQ(KeyOf(last), p_key) << "op " << p_op;
+    // A reject and the answer to a Cancel come alone. Fills come only before
+    // an Ack, a ReplaceAck, or a Done.
+    if (type != MsgType::Ack && type != MsgType::ReplaceAck && type != MsgType::Done)
+    {
+      ASSERT_EQ(p_reports.size(), 1U) << "op " << p_op;
+    }
+    if (const auto *ack = std::get_if<mex::wire::Ack>(&last.report_))
+    {
+      if (ack->leaves_ > Quantity{})
+      {
+        resting_[p_key] = RestingOrder{Price{p_price}, ack->leaves_};
+      }
+    }
+    else if (const auto *replace_ack = std::get_if<mex::wire::ReplaceAck>(&last.report_))
+    {
+      ASSERT_EQ(replace_ack->price_, Price{p_price}) << "op " << p_op;
+      if (replace_ack->leaves_ > Quantity{})
+      {
+        // The same price with fewer leaves is the only replace that keeps its place.
+        const bool in_place = p_reports.size() == 1 && p_before.price_ == replace_ack->price_ &&
+                              replace_ack->leaves_ < p_before.leaves_;
+        ++(in_place ? reduced_in_place_ : moved_);
+        resting_[p_key] = RestingOrder{replace_ack->price_, replace_ack->leaves_};
+      }
+      else
+      {
+        resting_.erase(p_key);
+      }
+    }
+    else if (type == MsgType::CancelAck)
+    {
+      resting_.erase(p_key);
+    }
+  }
+  Harness h_{6, 3};
+  std::map<OrderKey, RestingOrder> resting_;
+  std::map<std::tuple<CommandKind, bool, Outcome>, std::uint32_t> seen_;
+  std::uint32_t reduced_in_place_ = 0;
+  std::uint32_t moved_ = 0;
+  std::uint32_t makers_partly_filled_ = 0;
+  std::uint32_t makers_filled_ = 0;
+  std::uint64_t random_ = 0x9e3779b97f4a7c15ULL;
+  std::uint32_t Below(std::uint32_t p_bound)
+  {
+    random_ ^= random_ << 13U;
+    random_ ^= random_ >> 7U;
+    random_ ^= random_ << 17U;
+    return static_cast<std::uint32_t>(random_ % p_bound);
+  }
+};
 // Checks the order lifecycle over many random commands on two small books.
 // The test knows each order only from its reports, as a client does, and never
 // reads engine state. Each command must end in a row of OutcomesOf for the
@@ -1224,145 +1382,12 @@ std::optional<Reason> ReasonOf(const Report &p_report)
 // or a broken contract in a later command.
 TEST(EngineTest, OrderLifecycleHoldsOverManyRandomCommands)
 {
-  Harness h{6, 3};
-  std::map<OrderKey, RestingOrder> resting;
-  std::map<std::tuple<CommandKind, bool, Outcome>, std::uint32_t> seen;
-  std::uint32_t reduced_in_place = 0;
-  std::uint32_t moved = 0;
-  std::uint32_t makers_partly_filled = 0;
-  std::uint32_t makers_filled = 0;
-  std::uint64_t random = 0x9e3779b97f4a7c15ULL;
-  const auto below = [&random](std::uint32_t p_bound)
-  {
-    random ^= random << 13U;
-    random ^= random >> 7U;
-    random ^= random << 17U;
-    return static_cast<std::uint32_t>(random % p_bound);
-  };
-
+  Lifecycle lifecycle;
   for (std::uint32_t op = 0; op < 40000; ++op)
   {
-    // Few ids and prices, so that ids are used again and orders cross often.
-    const OrderKey key{.slot_ = below(2), .session_ = below(2) == 0 ? kA : kB, .id_ = 1 + below(6)};
-    const Side side = below(2) == 0 ? Side::Buy : Side::Sell;
-    const std::int64_t price = 98 + below(5);
-    // Half of the commands are NewOrder (one in ten of them a market order), a
-    // quarter Cancel, and a quarter Replace.
-    const std::uint32_t roll = below(100);
-    const CommandKind kind = roll < 50   ? CommandKind::NewOrder
-                             : roll < 75 ? CommandKind::Cancel
-                                         : CommandKind::Replace;
-    Command command{};
-    switch (kind)
-    {
-    case CommandKind::NewOrder:
-      command = roll < 5 ? Market(key.session_, key.id_, side, 1 + below(5), key.slot_)
-                         : Limit(key.session_, key.id_, side, price, 1 + below(5), key.slot_);
-      break;
-    case CommandKind::Cancel:
-      command = CancelOf(key.session_, key.id_, key.slot_);
-      break;
-    case CommandKind::Replace:
-      command = ReplaceOf(key.session_, key.id_, price, 1 + below(8), key.slot_);
-      break;
-    }
-    const auto found = resting.find(key);
-    const bool was_resting = found != resting.end();
-    const RestingOrder before = was_resting ? found->second : RestingOrder{};
-
-    const Reports reports = h.Send(command);
-
-    ASSERT_FALSE(reports.empty()) << "op " << op;
-    for (std::size_t i = 0; i + 1 < reports.size(); ++i)
-    {
-      const auto *fill = std::get_if<mex::wire::Fill>(&reports[i].report_);
-      ASSERT_NE(fill, nullptr) << "op " << op << ": only fills come before the final report";
-      const OrderKey fill_key = KeyOf(reports[i]);
-      if (fill->liquidity_ == Liquidity::Taker)
-      {
-        ASSERT_EQ(fill_key, key) << "op " << op;
-        continue;
-      }
-      ASSERT_NE(fill_key, key) << "op " << op << ": an order filled itself";
-      const auto maker = resting.find(fill_key);
-      ASSERT_TRUE(maker != resting.end()) << "op " << op << ": a fill of an order that ended";
-      ASSERT_EQ(fill->qty_ + fill->leaves_, maker->second.leaves_) << "op " << op;
-      if (fill->leaves_ == Quantity{})
-      {
-        resting.erase(maker);
-        ++makers_filled;
-      }
-      else
-      {
-        maker->second.leaves_ = fill->leaves_;
-        ++makers_partly_filled;
-      }
-    }
-
-    const Report &last = reports.back();
-    const MsgType type = TypeOf(last);
-    ASSERT_EQ(KeyOf(last), key) << "op " << op;
-    // A reject and the answer to a Cancel come alone. Fills come only before
-    // an Ack, a ReplaceAck, or a Done.
-    if (type != MsgType::Ack && type != MsgType::ReplaceAck && type != MsgType::Done)
-    {
-      ASSERT_EQ(reports.size(), 1U) << "op " << op;
-    }
-    if (const auto *ack = std::get_if<mex::wire::Ack>(&last.report_))
-    {
-      if (ack->leaves_ > Quantity{})
-      {
-        resting[key] = RestingOrder{Price{price}, ack->leaves_};
-      }
-    }
-    else if (const auto *replace_ack = std::get_if<mex::wire::ReplaceAck>(&last.report_))
-    {
-      ASSERT_EQ(replace_ack->price_, Price{price}) << "op " << op;
-      if (replace_ack->leaves_ > Quantity{})
-      {
-        // The same price with fewer leaves is the only replace that keeps its place.
-        const bool in_place = reports.size() == 1 && before.price_ == replace_ack->price_ &&
-                              replace_ack->leaves_ < before.leaves_;
-        ++(in_place ? reduced_in_place : moved);
-        resting[key] = RestingOrder{replace_ack->price_, replace_ack->leaves_};
-      }
-      else
-      {
-        resting.erase(key);
-      }
-    }
-    else if (type == MsgType::CancelAck)
-    {
-      resting.erase(key);
-    }
-
-    const Outcome outcome{
-        .type_ = type, .reason_ = ReasonOf(last), .rests_ = resting.contains(key)};
-    const std::vector<Outcome> allowed = OutcomesOf(kind, was_resting);
-    ASSERT_TRUE(std::ranges::find(allowed, outcome) != allowed.end())
-        << "op " << op << ": " << testing::PrintToString(last) << " is not an end of command kind "
-        << static_cast<int>(kind) << " for an order with resting = " << was_resting;
-    ++seen[{kind, was_resting, outcome}];
+    ASSERT_NO_FATAL_FAILURE(lifecycle.Step(op));
   }
-
-  // The run must meet every row of the lifecycle, or it proves less than it says.
-  for (const CommandKind kind : {CommandKind::NewOrder, CommandKind::Cancel, CommandKind::Replace})
-  {
-    for (const bool was_resting : {false, true})
-    {
-      for (const Outcome &outcome : OutcomesOf(kind, was_resting))
-      {
-        const std::uint32_t count = seen[{kind, was_resting, outcome}];
-        EXPECT_GT(count, 0U) << "kind " << static_cast<int>(kind) << " resting " << was_resting
-                             << " type " << static_cast<int>(outcome.type_) << " rests "
-                             << outcome.rests_;
-      }
-    }
-  }
-  EXPECT_GT(reduced_in_place, 0U);
-  EXPECT_GT(moved, 0U);
-  EXPECT_GT(makers_partly_filled, 0U);
-  EXPECT_GT(makers_filled, 0U);
+  lifecycle.CheckCoverage();
 }
 
 TEST(EngineTest, FullOutboundQueueStallsUntilTheGatewayDrainsIt)

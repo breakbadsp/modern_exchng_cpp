@@ -98,9 +98,11 @@ public:
   explicit ClientOrderIndex(std::uint32_t p_max_orders)
     pre (p_max_orders > 0);
 
-  [[nodiscard]] std::optional<OrderId> Find(SessionId p_owner, wire::ClientOrderId p_client_order_id) const;
+  [[nodiscard]] std::optional<OrderId> Find(SessionId p_owner,
+                                            wire::ClientOrderId p_client_order_id) const;
 
-  void Insert(const SessionId p_owner, const wire::ClientOrderId p_client_order_id, const OrderId p_order_id)
+  void Insert(const SessionId p_owner, const wire::ClientOrderId p_client_order_id,
+              const OrderId p_order_id)
     pre (p_order_id != kInvalidOrderId)
     pre (size_ < max_size_)
     post (Find(p_owner, p_client_order_id) == p_order_id);
@@ -115,7 +117,8 @@ public:
   void Clear();
 
   // The first entry a key probes. Public so tests can build probe chains that wrap.
-  [[nodiscard]] std::size_t HomeSlot(SessionId p_owner, wire::ClientOrderId p_client_order_id) const;
+  [[nodiscard]] std::size_t HomeSlot(SessionId p_owner,
+                                     wire::ClientOrderId p_client_order_id) const;
 
 private:
   struct Entry

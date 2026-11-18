@@ -647,6 +647,34 @@ TEST(ExchangeSession, BoundaryQuantitiesExtremePricesAndFullBook)
   ASSERT_TRUE(full.CancelAll());
 }
 
+std::int64_t ChoosePrice(std::mt19937 &p_rng, std::uniform_int_distribution<int> &p_values)
+{
+  const int kind = std::uniform_int_distribution<int>{0, 19}(p_rng);
+  if (kind == 0)
+  {
+    return std::numeric_limits<std::int64_t>::min();
+  }
+  if (kind == 1)
+  {
+    return std::numeric_limits<std::int64_t>::max();
+  }
+  return p_values(p_rng);
+}
+
+std::uint32_t ChooseQty(std::mt19937 &p_rng, std::uniform_int_distribution<int> &p_values)
+{
+  const int kind = std::uniform_int_distribution<int>{0, 19}(p_rng);
+  if (kind == 0)
+  {
+    return 0;
+  }
+  if (kind == 1)
+  {
+    return 1U << 16U;
+  }
+  return static_cast<std::uint32_t>(p_values(p_rng));
+}
+
 TEST(ExchangeSession, RandomFlowMatchesTheReferenceBook)
 {
   const struct
@@ -670,37 +698,7 @@ TEST(ExchangeSession, RandomFlowMatchesTheReferenceBook)
     std::uniform_int_distribution<int> action(0, 99);
     std::uniform_int_distribution<int> price_dist(0, config.price_span);
     std::uniform_int_distribution<int> qty_dist(1, 9);
-    std::uniform_int_distribution<int> qty_kind(0, 19);
-    std::uniform_int_distribution<int> price_kind(0, 19);
     std::uniform_int_distribution<int> side_bit(0, 1);
-
-    auto choose_price = [&]() -> std::int64_t
-    {
-      const int kind = price_kind(rng);
-      if (kind == 0)
-      {
-        return std::numeric_limits<std::int64_t>::min();
-      }
-      if (kind == 1)
-      {
-        return std::numeric_limits<std::int64_t>::max();
-      }
-      return price_dist(rng);
-    };
-
-    auto choose_qty = [&]() -> std::uint32_t
-    {
-      const int kind = qty_kind(rng);
-      if (kind == 0)
-      {
-        return 0;
-      }
-      if (kind == 1)
-      {
-        return 1U << 16U;
-      }
-      return static_cast<std::uint32_t>(qty_dist(rng));
-    };
 
     for (int step = 0; step < config.steps; ++step)
     {
@@ -709,11 +707,11 @@ TEST(ExchangeSession, RandomFlowMatchesTheReferenceBook)
       const mex::Side side = side_bit(rng) == 0 ? mex::Side::Buy : mex::Side::Sell;
       if (roll < 60)
       {
-        ASSERT_TRUE(session.Limit(side, choose_price(), choose_qty()));
+        ASSERT_TRUE(session.Limit(side, ChoosePrice(rng, price_dist), ChooseQty(rng, qty_dist)));
       }
       else if (roll < 80)
       {
-        ASSERT_TRUE(session.Market(side, choose_qty()));
+        ASSERT_TRUE(session.Market(side, ChooseQty(rng, qty_dist)));
       }
       else if (session.LiveCount() > 0)
       {
@@ -722,7 +720,7 @@ TEST(ExchangeSession, RandomFlowMatchesTheReferenceBook)
       }
       else
       {
-        ASSERT_TRUE(session.Limit(side, choose_price(), choose_qty()));
+        ASSERT_TRUE(session.Limit(side, ChoosePrice(rng, price_dist), ChooseQty(rng, qty_dist)));
       }
     }
     session.SetStep(config.steps);

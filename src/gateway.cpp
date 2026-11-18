@@ -844,6 +844,11 @@ void Gateway::StopUring()
     static_cast<void>(io_uring_submit_and_wait_timeout(ring, &cqe, 1, &timeout, nullptr));
     while (io_uring_peek_cqe(ring, &cqe) == 0)
     {
+      // A successful accept transfers a descriptor even after shutdown starts.
+      if (OpOf(io_uring_cqe_get_data64(cqe)) == Op::Accept && cqe->res >= 0)
+      {
+        UniqueFd accepted{cqe->res};
+      }
       if (IsFinal(io_uring_cqe_get_data64(cqe), cqe->flags))
       {
         --uring_ops_;

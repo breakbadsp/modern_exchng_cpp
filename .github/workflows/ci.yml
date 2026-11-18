@@ -38,7 +38,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends cmake ninja-build libgtest-dev liburing-dev pkg-config
+          apt-get install --yes --no-install-recommends cmake ninja-build libgtest-dev liburing-dev pkg-config python3 clang-format universal-ctags
 
       # libvsr is private. This key has read-only access to that repository.
       - name: Check out libvsr
@@ -53,6 +53,10 @@ jobs:
 
       - name: Configure
         run: cmake --preset "${{ matrix.preset }}" -DMEX_LIBVSR_SOURCE_DIR="$GITHUB_WORKSPACE/.ci/libvsr"
+
+      - name: Check C++ format
+        if: matrix.preset == 'ninja'
+        run: cmake --build --preset ninja --target clang-format-check
 
       - name: Build
         run: cmake --build --preset "${{ matrix.preset }}" --parallel 2

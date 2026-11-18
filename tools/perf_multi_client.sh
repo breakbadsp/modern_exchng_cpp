@@ -9,6 +9,11 @@
 # The I/O backend argument needs a mex_exchange that accepts --io.
 set -euo pipefail
 
+if (( $# < 5 || $# > 6 )) || [[ ! $2 =~ ^[1-8]$ ]]; then
+  echo "usage: $0 <build dir> <clients 1-8> <orders> <window> <rate> [epoll|uring]" >&2
+  exit 2
+fi
+
 build=$1
 clients=$2
 orders=$3
@@ -17,7 +22,17 @@ rate=$5
 io=${6:-}
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+exchange=''
+pids=()
+cleanup() {
+  for pid in "${pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+  if [[ -n $exchange ]]; then kill -TERM "$exchange" 2>/dev/null || true; fi
+  wait
+  rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 port=$((20000 + RANDOM % 20000))
 {
   echo "engine 4"
@@ -45,8 +60,7 @@ for _ in $(seq 50); do
 done
 
 start=$(date +%s.%N)
-pids=()
-for i in $(seq 0 $((clients - 1))); do
+for ((i = 0; i < clients; ++i)); do
   taskset -c 0-2 "$build/mex_loadgen" --port "$port" --session "s$i" --token "token$i" \
     --symbols $((101 + i)) --orders "$orders" --window "$window" --rate "$rate" \
     > "$work/client$i.log" 2>&1 &
@@ -56,10 +70,12 @@ failed=0
 for pid in "${pids[@]}"; do
   wait "$pid" || failed=1
 done
+pids=()
 end=$(date +%s.%N)
-kill -INT "$exchange"
+kill -INT "$exchange" 2>/dev/null || true
 exchange_rc=0
 wait "$exchange" || exchange_rc=$?
+exchange=
 
 # Total ops/s uses wall time over all clients. p50 is the median client's p50;
 # p99 is the worst client's p99.
@@ -81,3 +97,4 @@ print(f"clients={clients} ops={ops} total_ops_s={ops / wall:,.0f} "
       f"client_failed={failed} exchange_rc={exchange_rc}")
 PY
 grep -E 'stalls|dropped' "$work/exchange.log" || true
+(( failed == 0 && exchange_rc == 0 ))
