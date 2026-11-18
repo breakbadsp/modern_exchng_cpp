@@ -416,6 +416,31 @@ TEST_P(GatewayTest, LogonIsAckedWithSeqOne)
   static_cast<void>(Next<wire::LogonAck>(alice, 1));
 }
 
+// Stop with more pending accepts than the gateway can service in one poll.
+TEST(GatewayShutdown, UringClosesClientsThatConnectDuringShutdown)
+{
+  constexpr std::size_t kClients = 32;
+  std::vector<Client> pending;
+  pending.reserve(kClients);
+  {
+    Exchange exchange{GatewayIo::Uring, Options{.max_connections_ = 1}};
+    Client alice{exchange.Port()};
+    alice.Send(AliceLogon());
+    static_cast<void>(Next<wire::LogonAck>(alice, 1));
+
+    const GatewayStall stall{exchange.GatewayThread()};
+    for (std::size_t i = 0; i < kClients; ++i)
+    {
+      pending.emplace_back(exchange.Port());
+    }
+    exchange.Gate().Stop();
+  }
+  for (const Client &client : pending)
+  {
+    ASSERT_TRUE(client.IsClosedByPeer());
+  }
+}
+
 TEST_P(GatewayTest, BadTokenIsRejectedAndClosed)
 {
   const Exchange exchange{GetParam()};

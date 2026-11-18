@@ -52,7 +52,7 @@ jobs:
           persist-credentials: false
 
       - name: Configure
-        run: cmake --preset "${{ matrix.preset }}" -DMEX_LIBVSR_SOURCE_DIR="$GITHUB_WORKSPACE/.ci/libvsr"
+        run: cmake --preset "${{ matrix.preset }}" -DMEX_REQUIRE_STYLE_TOOLS=ON -DMEX_LIBVSR_SOURCE_DIR="$GITHUB_WORKSPACE/.ci/libvsr"
 
       - name: Check C++ format
         if: matrix.preset == 'ninja'

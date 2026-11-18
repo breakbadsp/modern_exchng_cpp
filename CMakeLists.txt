@@ -201,7 +201,11 @@ add_test(NAME tool_limits COMMAND ${Python3_EXECUTABLE}
 
 file(GLOB_RECURSE MEX_FORMAT_SOURCES CONFIGURE_DEPENDS
     src/*.cpp src/*.hpp tests/*.cpp tests/*.hpp tools/*.cpp tools/*.hpp)
-find_program(CTAGS_EXECUTABLE NAMES universal-ctags ctags)
+option(MEX_REQUIRE_STYLE_TOOLS "Require Universal Ctags for the style test" OFF)
+find_program(CTAGS_EXECUTABLE NAMES ctags-universal universal-ctags ctags)
+if(MEX_REQUIRE_STYLE_TOOLS AND NOT CTAGS_EXECUTABLE)
+    message(FATAL_ERROR "Universal Ctags is required for the TigerStyle check")
+endif()
 if(CTAGS_EXECUTABLE)
     add_test(NAME tiger_style COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/tiger_style.py --ctags ${CTAGS_EXECUTABLE}

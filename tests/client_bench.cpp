@@ -228,7 +228,8 @@ struct Timing
   double elapsed_ns_;
   double cpu_ns_;
 };
-Timing Measure(ClientFlow &p_flow, std::uint64_t p_cycles, Samples &p_samples)
+Timing Measure(ClientFlow &p_flow, std::uint64_t p_cycles, Samples &p_samples,
+               bool p_measure_latency)
 {
   const auto cpu_start = std::clock();
   const auto start = Clock::now();
@@ -236,7 +237,7 @@ Timing Measure(ClientFlow &p_flow, std::uint64_t p_cycles, Samples &p_samples)
   {
     for (std::size_t step = 0; step < kSteps; ++step)
     {
-      if (!p_samples.front().empty())
+      if (p_measure_latency)
       {
         const auto before = Clock::now();
         p_flow.Step(step, cycle);
@@ -282,12 +283,12 @@ void ReportLatency(Samples &p_samples, std::size_t p_cycles)
 }
 
 int RunFlow(std::string_view p_mode, std::uint64_t p_cycles, std::uint64_t p_levels,
-            std::optional<PerfControl> p_perf)
+            std::optional<PerfControl> p_perf, bool p_measure_latency)
 {
   ClientFlow flow(static_cast<std::uint32_t>(p_levels));
   WarmUp(flow);
   Samples samples;
-  if ((p_mode == "latency"))
+  if (p_measure_latency)
   {
     for (auto &values : samples)
     {
@@ -310,7 +311,7 @@ int RunFlow(std::string_view p_mode, std::uint64_t p_cycles, std::uint64_t p_lev
       return 1;
     }
   }
-  const auto [elapsed_ns, cpu_ns] = Measure(flow, p_cycles, samples);
+  const auto [elapsed_ns, cpu_ns] = Measure(flow, p_cycles, samples, p_measure_latency);
   if (p_perf.has_value())
   {
     const auto disabled = ControlPerf(*p_perf, "disable\n");
@@ -338,7 +339,7 @@ int RunFlow(std::string_view p_mode, std::uint64_t p_cycles, std::uint64_t p_lev
                "user_cpu_ns,{:.0f},system_cpu_ns,{:.0f},checksum,{}",
                p_mode, p_levels, p_cycles * kSteps, elapsed_ns / operations, cpu_ns / operations,
                user_cpu_ns, system_cpu_ns, flow.Checksum());
-  if ((p_mode == "latency"))
+  if (p_measure_latency)
   {
     ReportLatency(samples, p_cycles);
   }
@@ -369,7 +370,7 @@ int Run(std::span<char *> p_args)
     std::println(stderr, "perf mode requires the scripts/perf_control.py control channel");
     return 2;
   }
-  return RunFlow(mode, *cycles, *levels, perf_control);
+  return RunFlow(mode, *cycles, *levels, perf_control, measure_latency);
 }
 } // namespace
 } // namespace mex

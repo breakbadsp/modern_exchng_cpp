@@ -59,7 +59,7 @@ struct ReplicaConfig
   std::uint16_t gateway_port_ = 0;    // the client port of this replica
 };
 
-// Bounds the text buffer and the number of startup records.
+// Caps the memory used to read configuration text at startup.
 constexpr std::size_t kMaxConfigBytes = 1024 * 1024;
 
 // libvsr supports clusters up to this size.
