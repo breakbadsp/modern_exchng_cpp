@@ -90,6 +90,10 @@ cmake --build build --target clang-format-check  # verify (non-zero if drift)
 
 ## Performance
 
+Use the [performance framework](benchmarks/README.md) to test active
+sessions, bursts, reconnects, and saturation. It writes local throughput
+and P100 reports with the settings and limits for each run.
+
 Design target: **100k–500k+** order ops/s on one thread ([`prep/requirements.md`](prep/requirements.md)). `bench_book`, `mex_exchange`, and `mex_loadgen` build at **`-O3`** (tests use Debug).
 
 ```bash

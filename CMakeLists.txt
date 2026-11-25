@@ -198,9 +198,11 @@ add_test(NAME bench_client_smoke COMMAND bench_client batch 1000 64)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME tool_limits COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/tool_limits_test.py $<TARGET_FILE:mex_loadgen>)
+add_test(NAME perf_report COMMAND ${Python3_EXECUTABLE} -B -m unittest discover
+    -s ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks -p test_report.py)
 
 file(GLOB_RECURSE MEX_FORMAT_SOURCES CONFIGURE_DEPENDS
-    src/*.cpp src/*.hpp tests/*.cpp tests/*.hpp tools/*.cpp tools/*.hpp)
+    src/*.cpp src/*.hpp tests/*.cpp tests/*.hpp tools/*.cpp tools/*.hpp benchmarks/*.cpp)
 option(MEX_REQUIRE_STYLE_TOOLS "Require Universal Ctags for the style test" OFF)
 find_program(CTAGS_EXECUTABLE NAMES ctags-universal universal-ctags ctags)
 if(MEX_REQUIRE_STYLE_TOOLS AND NOT CTAGS_EXECUTABLE)
