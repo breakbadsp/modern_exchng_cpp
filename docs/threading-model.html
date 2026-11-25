@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MEX threading model</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --ink: #eef5ff;
+    --quiet: #a6b7ce;
+    --surface: #101b2c;
+    --line: #2c405b;
+    --cyan: #74e1fb;
+    --violet: #c1acff;
+    --mint: #86ebbc;
+    --amber: #ffcf82;
+    --code: ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--ink); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 1000px; margin: auto; }
+  .guide {
+    padding: clamp(14px, 3vw, 32px);
+    border-radius: 18px;
+    background: radial-gradient(ellipse at 85% 0%, #172a45, transparent 48%), #0b1321;
+    border: 1px solid #253754;
+  }
+  h1, h2, p { margin: 0; }
+  h1 { font-size: clamp(29px, 6vw, 56px); line-height: 1.05; letter-spacing: -.045em; }
+  h2 { font-size: 17px; line-height: 1.25; }
+  a { color: var(--cyan); }
+  code, .mono { font-family: var(--code); }
+  .intro { color: var(--quiet); margin-block: 10px 20px; }
+  .top, .scenarios, .controls, .legend {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  }
+  .top { justify-content: space-between; gap: 10px 16px; }
+  .modes { display: flex; gap: 4px; padding: 4px; border-radius: 10px; background: #070e1a; }
+  button {
+    font: inherit; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--cyan); }
+  button[aria-pressed="true"] { color: #06101e; background: var(--cyan); border-color: var(--cyan); }
+  button:disabled { opacity: .45; cursor: default; }
+  :focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
+  .scenarios { margin-block: 12px; }
+  .scenarios button, .modes button, .controls button { font-size: 13px; }
+  .map {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 25px 18px;
+    isolation: isolate; position: relative; padding: 11px;
+    border: 1px solid var(--line); border-radius: 13px;
+    background: radial-gradient(circle, #324463 1px, transparent 1px) 0 0 / 16px 16px, #080f1d;
+  }
+  .node {
+    position: relative; display: grid; align-content: center; gap: 4px;
+    min-height: 81px; padding: 8px; border: 1px solid var(--line); border-radius: 8px;
+    background: #121e31; box-shadow: 0 3px 10px #080f1d;
+    transition: border-color .22s, background .22s;
+  }
+  .node[data-kind="queue"] { border-style: dashed; }
+  .node[data-kind="gateway"] { --node-color: var(--cyan); }
+  .node[data-kind="worker"] { --node-color: var(--violet); }
+  .node[data-kind="queue"] { --node-color: var(--mint); }
+  .node[data-kind="cluster"] { --node-color: var(--amber); }
+  .node[data-kind="external"] { --node-color: #bed0ec; }
+  .node.active { border-color: var(--node-color); background: #1a2a41; }
+  .node .role { color: var(--node-color); font: 10px/1.15 var(--code); overflow-wrap: anywhere; }
+  .node strong { font-size: clamp(12px, 2.4vw, 15px); line-height: 1.15; }
+  .node .detail { font-size: 11px; color: var(--quiet); line-height: 1.2; }
+  #apply { grid-area: 2 / 1; }
+  #gate { grid-area: 2 / 2; }
+  #consume { grid-area: 2 / 3; }
+  #wires { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; }
+  .marks { display: flex; gap: 4px; margin-top: 2px; }
+  .marks:empty { display: none; }
+  .marks i { width: 12px; height: 6px; border: 1px solid #6c809c; border-radius: 2px; }
+  .marks .filled { border-color: var(--node-color); background: var(--node-color); }
+  .packet {
+    position: absolute; z-index: 2; top: 0; left: 0; width: 9px; height: 9px;
+    margin: -4px 0 0 -4px; border-radius: 50%; pointer-events: none;
+    color: var(--cyan); background: currentColor; box-shadow: 0 0 10px 3px currentColor; visibility: hidden;
+  }
+  .packet.report { color: var(--mint); }
+  .packet.wait { color: var(--amber); }
+  .legend { margin-block: 7px 12px; color: var(--quiet); font-size: 11px; }
+  .legend span::before { content: '●'; margin-right: 5px; color: var(--swatch); }
+  .readout { display: grid; grid-template-columns: 1.7fr 1fr; gap: 8px; }
+  .step, .state { padding: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
+  .step p { color: var(--quiet); font-size: 13px; margin-top: 5px; }
+  #step-index { display: block; font: 11px var(--code); color: var(--cyan); margin-bottom: 6px; }
+  .state dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 9px; margin: 0; font-size: 12px; }
+  .state dt { color: var(--quiet); }
+  .state dd { margin: 0; color: var(--ink); }
+  .controls { margin-top: 12px; }
+  #scrub { flex: 1 1 90px; min-width: 60px; accent-color: var(--cyan); }
+  .speed-control { display: flex; align-items: center; gap: 5px; }
+  #speed { color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 5px; }
+  .notes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+  details { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #0d1727; }
+  summary { cursor: pointer; font-size: 13px; }
+  details p { margin-top: 8px; color: var(--quiet); font-size: 13px; }
+  .sources { color: var(--quiet); font-size: 12px; margin-top: 12px; }
+  @media (max-width: 580px) {
+    .map { gap: 20px 12px; padding: 7px; }
+    .node { padding: 5px; min-height: 77px; }
+    .node .role { font-size: 9px; }
+    #scrub { flex-basis: 65px; }
+    .readout, .notes { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .node { transition: none; }
+  }
+</style>
+</head>
+<body>
+<main>
+<section class="guide" aria-labelledby="title">
+  <div class="top">
+    <h1 id="title">MEX threading model</h1>
+    <div class="modes" role="group" aria-label="Runtime mode">
+      <button type="button" data-mode="local" aria-pressed="true">Standalone</button>
+      <button type="button" data-mode="replica" aria-pressed="false">Replicated</button>
+    </div>
+  </div>
+  <p class="intro" id="summary"></p>
+  <div class="scenarios" id="scenarios" role="group" aria-label="Scenario"></div>
+
+  <div class="map" id="map" role="group" aria-label="Thread and queue diagram">
+    <svg id="wires" aria-hidden="true">
+      <defs>
+        <marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0 0 L6 3 L0 6 Z" fill="#6883a8"/>
+        </marker>
+      </defs>
+      <g id="routes"></g>
+    </svg>
+    <div class="node" id="client"></div>
+    <div class="node" id="rx"></div>
+    <div class="node" id="in"></div>
+    <div class="node" id="consume"></div>
+    <div class="node" id="gate"></div>
+    <div class="node" id="apply"></div>
+    <div class="node" id="out"></div>
+    <div class="node" id="tx"></div>
+    <div class="node" id="report"></div>
+  </div>
+  <div class="legend" aria-label="Color key">
+    <span style="--swatch:var(--cyan)">Gateway</span>
+    <span style="--swatch:var(--violet)">Worker</span>
+    <span style="--swatch:var(--mint)">Queue or report</span>
+    <span style="--swatch:var(--amber)">Commit or wait</span>
+  </div>
+
+  <div class="readout">
+    <div class="step" aria-live="polite" aria-atomic="true">
+      <span id="step-index"></span>
+      <h2 id="step-title"></h2>
+      <p id="step-detail"></p>
+    </div>
+    <div class="state" aria-label="State after this step">
+      <dl>
+        <dt>Command ring</dt><dd id="in-state"></dd>
+        <dt>Report ring</dt><dd id="out-state"></dd>
+        <dt id="work-label">Matching</dt><dd id="work-state"></dd>
+      </dl>
+    </div>
+  </div>
+  <div class="controls" aria-label="Playback controls">
+    <button type="button" id="play">Play</button>
+    <button type="button" id="previous" aria-label="Previous step">←</button>
+    <button type="button" id="next" aria-label="Next step">→</button>
+    <input type="range" id="scrub" min="0" max="1" value="0" aria-label="Step">
+    <div class="speed-control">
+      <label class="mono" for="speed">Speed</label>
+      <select id="speed">
+        <option value="0.5">½×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="notes">
+    <details>
+      <summary>Who owns the books?</summary>
+      <p>Standalone mode starts one <code>mex-engine-N</code> thread per configured engine. Each
+        thread creates its books on startup, tries to pin to its configured CPU, and
+        busy-polls its command ring. One engine can own several symbols. Each symbol
+        has one owner. Separate engines can match concurrently.</p>
+      <p>In replicated mode, each process has three workers and a main thread. The main thread
+        creates the state machine and replays committed storage during server setup.
+        <code>mex-replica</code> then applies committed entries to all local engines
+        in log and batch order. Engine core settings do not apply in this mode.</p>
+    </details>
+    <details>
+      <summary>How does an SPSC ring hand off data?</summary>
+      <p>Each bounded ring has one producer and one consumer. The producer copies a
+        command or report into a slot and publishes the tail with a release store.
+        The consumer acquires the tail before it reads new slots and publishes the
+        head after reading. The producer acquires the head before it reuses slots
+        when the ring looks full. Each index has its own cache line.</p>
+      <p>Each configured engine has a command ring and a report ring in both
+        modes. In replicated mode the bridge polls the command rings in turn,
+        and the replica thread writes to the report rings. The diagram shows one
+        pair. It uses four slots for illustration. Steps show order, with no
+        measured timing.</p>
+    </details>
+    <details>
+      <summary>What does the gateway own?</summary>
+      <p><code>mex-gateway</code> owns the client sockets, connection and session
+        tables, frame parsing, routing, and socket writes. Both I/O boxes show the
+        same thread. Each loop polls for client I/O, drains up to one ring capacity
+        of reports per engine, then flushes pending writes. <code>epoll</code> polls
+        with zero timeout. <code>io_uring</code> uses the gateway as its single
+        userspace issuer. A short-lived helper creates the ring at startup.</p>
+    </details>
+    <details>
+      <summary>What does commit guarantee?</summary>
+      <p>Every replica applies the same committed log. A batch reply to the bridge
+        contains the count of applied entries. Each replica produces its own client
+        reports and sends them to sessions connected there. A slow socket can be
+        closed if the send buffer fills. Reports can be lost after a disconnect.
+        Replay changes the books. A replica emits reports only for operations after
+        its startup replay point whose timestamps are at or after its process start.</p>
+    </details>
+  </div>
+  <p class="sources">Source
+    <a href="../src/main.cpp">startup</a> ·
+    <a href="../src/gateway.cpp">gateway</a> ·
+    <a href="../src/engine.cpp">engine</a> ·
+    <a href="../src/spsc_queue.hpp">rings</a> ·
+    <a href="../src/replication.hpp">bridge</a> ·
+    <a href="../src/replication.cpp">apply</a> ·
+    <a href="../src/replicated_exchange.cpp">replica process</a> ·
+    <a href="replication.md">replication guide</a>
+  </p>
+  <noscript><p>Enable JavaScript to step through the diagram. The notes above describe both modes.</p></noscript>
+</section>
+</main>
+<script>
+'use strict';
+
+const byId = (id) => document.getElementById(id);
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const ringSlots = 4;
+const replicas = 3;
+
+const commonNodes = {
+  client: ['external', 'CLIENT', 'Send order', 'TCP frame'],
+  rx: ['gateway', 'mex-gateway', 'Read & route', 'Check session and symbol'],
+  in: ['queue', 'SPSC · INBOUND', 'Commands', 'Gateway writes'],
+  out: ['queue', 'SPSC · OUTBOUND', 'Reports', 'Gateway reads'],
+  tx: ['gateway', 'mex-gateway', 'Drain & write', 'Route by session'],
+  report: ['external', 'CLIENTS', 'Receive reports', 'Maker and taker'],
+};
+const layouts = {
+  local: {
+    summary: 'One gateway and one worker per configured engine. Each symbol has one matching owner.',
+    nodes: {
+      consume: ['worker', 'mex-engine-0', 'Pop command', 'Poll this engine’s ring'],
+      gate: ['worker', 'mex-engine-1', 'Other symbols', 'Independent engine and rings'],
+      apply: ['worker', 'mex-engine-0', 'Match on book', 'Apply on the same worker'],
+    },
+    handoffs: [['consume', 'apply']],
+  },
+  replica: {
+    summary: 'Three workers per replica. One replica thread applies the committed log across all local books.',
+    nodes: {
+      consume: ['worker', 'mex-bridge', 'Build batch', 'One batch in progress'],
+      gate: ['cluster', 'LIBVSR CLUSTER', 'Commit gate', 'Three replicas in this example'],
+      apply: ['worker', 'mex-replica', 'Apply locally', 'All engines on one thread'],
+    },
+    handoffs: [['consume', 'gate'], ['gate', 'apply']],
+  },
+};
+
+const inboundPath = [['client', 'rx'], ['rx', 'in'], ['in', 'consume']];
+const outboundPath = [['apply', 'out'], ['out', 'tx'], ['tx', 'report']];
+
+const startMatch = [
+  {title: 'One resting sell, one incoming buy', active: 'client',
+    detail: 'Alice sends a buy for 5 at 100. Bob already has a sell for 5 at 100 on this symbol. Follow the buy to the book and the fills back to both sessions.'},
+  {title: 'The gateway publishes a command', active: 'in', via: ['client', 'rx', 'in'], input: 1,
+    detail: 'The gateway decodes the frame, checks the order, and selects the ring for this symbol. The consumer can see the command after publication.'},
+];
+const finishMatch = [
+  {title: 'The state owner matches at 100', active: 'apply', work: 'Trade 5 @ 100',
+    detail: 'The same thread updates the book and order metadata. The sell is fully filled. The maker report comes before the taker report for this match.'},
+  {title: 'One match produces several reports', active: 'out', via: ['apply', 'out'], tone: 'report',
+    output: 3, packets: 3, work: 'Trade 5 @ 100',
+    detail: 'The engine writes Bob’s maker fill, Alice’s taker fill, and Alice’s Ack with zero leaves to the outbound ring.'},
+  {title: 'The gateway delivers by session', active: 'report', via: ['out', 'tx', 'report'], tone: 'report', packets: 3,
+    work: 'Trade 5 @ 100',
+    detail: 'The gateway pops the reports, assigns wire sequence numbers per session, and sends them to local connections. In a cluster, Bob and Alice can receive reports from different replicas.'},
+];
+
+const pressure = [
+  {title: 'The consumer falls behind', active: 'in', input: 3,
+    detail: 'The gateway can keep taking orders while the consumer is busy. Three of the four example slots hold commands.'},
+  {title: 'The last free command slot fills', active: 'in', via: ['rx', 'in'], input: 4,
+    detail: 'The bounded command ring reaches capacity. The next order for this engine needs a free slot.'},
+  {title: 'Full inbound ring returns SystemBusy', active: 'rx', via: ['in', 'rx', 'client'], tone: 'wait', input: 4,
+    detail: 'The failed push leaves the ring intact. The gateway makes the reject on its own thread and sends it to the submitting session.'},
+  {title: 'Full outbound ring stalls the producer', active: 'out', via: ['apply', 'out'], tone: 'wait', output: 4,
+    detail: 'In this separate example, a match has reports ready to send. The next report has no free slot. The matching thread spins in Engine::Emit until it can publish that report.'},
+  {title: 'The gateway frees a report slot', active: 'tx', via: ['out', 'tx'], tone: 'report', output: 3,
+    detail: 'The gateway pops independently of the matching thread. This step shows the slot before the waiting producer reuses it.'},
+  {title: 'The waiting producer can continue', active: 'out', via: ['apply', 'out'], tone: 'report', output: 4,
+    detail: 'The producer publishes the pending report to the free slot, then continues its work. A slow client can still lose its connection if its gateway send buffer fills.'},
+];
+
+const gatewayStops = {
+  title: 'Main stops the gateway last', active: 'tx',
+  detail: 'The matching thread can still need a free report slot during shutdown. The gateway must be available to drain reports until the matching thread exits. Shutdown does not promise to deliver every queued report.',
+};
+
+const scenarios = {
+  local: {
+    'Follow an order': [...startMatch,
+      {title: 'Engine 0 pops the command', active: 'consume', via: ['in', 'consume'],
+        detail: 'Engine 0 takes commands from its ring in FIFO order. Engine 1 can match a different symbol at the same time.'},
+      {...finishMatch[0], via: ['consume', 'apply']},
+      ...finishMatch.slice(1)],
+    'Queue pressure': pressure,
+    'Shutdown': [
+      {title: 'Main observes SIGINT or SIGTERM', active: 'rx',
+        detail: 'Main checks the stop flag on a loop with a 50 ms sleep. The gateway and engine threads still run.'},
+      {title: 'Main stops and joins the engines', active: 'apply', output: 4,
+        detail: 'Main requests stop and joins each engine in turn. If an engine is already emitting a report, it can still need the running gateway to make space.'},
+      gatewayStops],
+  },
+  replica: {
+    'Follow an order': [...startMatch,
+      {title: 'The bridge consumes the command', active: 'consume', via: ['in', 'consume'],
+        work: 'Batch in progress',
+        detail: 'The bridge takes one command from each ring in turn. It packs the batch and submits it through the libvsr client, which finds the primary.'},
+      {title: 'A majority makes the batch durable', active: 'gate', via: ['consume', 'gate'],
+        tone: 'wait', votes: 2, work: 'Committed',
+        detail: 'A majority is two of the three replicas in this example. Commit gives the batch one position in the log. The local replica applies when it reaches that commit.'},
+      {...finishMatch[0], via: ['gate', 'apply'], votes: 2},
+      ...finishMatch.slice(1).map((step) => ({...step, votes: 2}))],
+    'Queue pressure': pressure,
+    'Quorum delay': [
+      {title: 'Batch A waits at the commit gate', active: 'gate', via: ['consume', 'gate'],
+        tone: 'wait', votes: 1, work: 'A in progress',
+        detail: 'Only one of three replicas has made this batch durable in the example. The bridge has one request in progress. Pending work has yet to reach the matching code.'},
+      {title: 'More orders arrive during the wait', active: 'in', via: ['rx', 'in'],
+        input: 2, votes: 1, work: 'A in progress',
+        detail: 'The gateway stays active. It can accept more commands until the inbound rings fill. The bridge leaves these commands queued while it waits for A.'},
+      {title: 'A timeout leaves the outcome unknown', active: 'consume', via: ['gate', 'consume'],
+        tone: 'wait', input: 2, votes: 1, work: 'A awaiting reply',
+        detail: 'A wait can time out after 200 ms. On timeout the bridge calls Resume for the same request. It keeps B queued because a new batch could apply out of order.'},
+      {title: 'A commits and the local replica applies it', active: 'apply', via: ['gate', 'apply'],
+        input: 2, votes: 2, work: 'A committed',
+        detail: 'The replica executes the committed entries in batch order. MEX packs the VSR operation number and batch entry index into one operation number per order.'},
+      {title: 'A’s reply frees the bridge to take B', active: 'consume',
+        via: ['in', 'consume'], work: 'B in progress',
+        detail: 'This step follows the bridge when it receives a successful reply for A. A’s client reports travel independently through the replica’s local report rings.'},
+    ],
+    'Shutdown': [
+      {title: 'Main observes stop or replica exit', active: 'apply',
+        detail: 'Main checks for SIGINT, SIGTERM, or exit from the replica loop. It coordinates the three worker threads.'},
+      {title: 'Main stops and joins the bridge', active: 'consume',
+        detail: 'The bridge stops requesting new batches. A cluster wait uses a 200 ms timeout so the bridge can check its stop flag.'},
+      {title: 'Main stops and joins the replica', active: 'apply', output: 4,
+        detail: 'The replica can still be applying a committed batch. The running gateway can free space for its reports.'},
+      gatewayStops],
+  },
+};
+
+let mode = 'local';
+let scenario = 'Follow an order';
+let index = 0;
+let timer;
+let playing = false;
+let packets = [];
+
+function steps() {
+  return scenarios[mode][scenario];
+}
+
+function setupNodes() {
+  for (const [id, [kind, role, title, detail]] of Object.entries({...commonNodes, ...layouts[mode].nodes})) {
+    const node = byId(id);
+    node.dataset.kind = kind;
+    // These labels come only from the diagram definitions above.
+    node.innerHTML = '<span class="role"></span><strong></strong><span class="detail"></span><span class="marks" aria-hidden="true"></span>';
+    [role, title, detail].forEach((value, position) => { node.children[position].textContent = value; });
+  }
+}
+
+function point(id, edge = 'center') {
+  const map = byId('map').getBoundingClientRect();
+  const rect = byId(id).getBoundingClientRect();
+  return {
+    x: (edge === 'left' ? rect.left : edge === 'right' ? rect.right : rect.left + rect.width / 2) - map.left - byId('map').clientLeft,
+    y: (edge === 'top' ? rect.top : edge === 'bottom' ? rect.bottom : rect.top + rect.height / 2) - map.top - byId('map').clientTop,
+  };
+}
+
+function drawRoutes(step = steps()[index]) {
+  const routes = [...inboundPath, ...layouts[mode].handoffs, ...outboundPath];
+  function isActive(from, to) {
+    const offset = step.via?.indexOf(from) ?? -1;
+    return offset >= 0 && step.via[offset + 1] === to;
+  }
+
+  byId('routes').replaceChildren(...routes.map(([from, to]) => {
+    if (isActive(to, from)) [from, to] = [to, from];
+    const start = point(from);
+    const end = point(to);
+    const horizontal = Math.abs(start.y - end.y) < 1;
+    const edges = horizontal
+      ? (start.x < end.x ? ['right', 'left'] : ['left', 'right'])
+      : (start.y < end.y ? ['bottom', 'top'] : ['top', 'bottom']);
+    const a = point(from, edges[0]);
+    const b = point(to, edges[1]);
+    const bypass = mode === 'local' && from === 'consume';
+    const detour = point(from, 'bottom').y + 11;
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    line.setAttribute('d', bypass
+      ? `M ${start.x} ${point(from, 'bottom').y} V ${detour} H ${end.x} V ${point(to, 'bottom').y}`
+      : `M ${a.x} ${a.y} L ${b.x} ${b.y}`);
+    const live = isActive(from, to);
+    const color = step.tone === 'report' ? 'var(--mint)' : step.tone === 'wait' ? 'var(--amber)' : 'var(--cyan)';
+    line.setAttribute('fill', 'none');
+    line.setAttribute('stroke', live ? color : '#6883a8');
+    line.setAttribute('stroke-width', live ? '2' : '1');
+    line.setAttribute('marker-end', 'url(#arrow)');
+    return line;
+  }));
+}
+
+function clearPackets() {
+  packets.forEach((packet) => packet.remove());
+  packets = [];
+}
+
+function pulse(step) {
+  clearPackets();
+  if (!step.via || reducedMotion.matches) return;
+  const points = [];
+  for (const [position, id] of step.via.entries()) {
+    const prior = step.via[position - 1];
+    if (mode === 'local' && prior === 'consume' && id === 'apply') {
+      const y = point(prior, 'bottom').y + 11;
+      points.push({x: point(prior).x, y}, {x: point(id).x, y});
+    }
+    points.push(point(id));
+  }
+  const keyframes = points.map(({x, y}, i) => ({
+    transform: `translate(${x}px, ${y}px)`, opacity: i === points.length - 1 ? 0 : 1, visibility: 'visible',
+  }));
+  const count = step.packets ?? 1;
+  for (let i = 0; i < count; i++) {
+    const packet = document.createElement('i');
+    packet.className = `packet ${step.tone ?? ''}`;
+    packet.setAttribute('aria-hidden', 'true');
+    byId('map').append(packet);
+    packets.push(packet);
+    packet.animate(keyframes, {duration: 650 / Number(byId('speed').value), delay: i * 85})
+      .finished.then(() => packet.remove(), () => {});
+  }
+}
+
+function showMarks(id, count, total = ringSlots) {
+  const marks = byId(id).querySelector('.marks');
+  marks.replaceChildren(...Array.from({length: total}, (_, i) => {
+    const mark = document.createElement('i');
+    if (i < count) mark.className = 'filled';
+    return mark;
+  }));
+}
+
+function showStep(animate = true) {
+  const step = steps()[index];
+  for (const node of document.querySelectorAll('.node')) {
+    node.classList.toggle('active', node.id === step.active || Boolean(step.via?.includes(node.id)));
+  }
+  byId('step-index').textContent = `STEP ${index + 1} / ${steps().length}`;
+  byId('step-title').textContent = step.title;
+  byId('step-detail').textContent = step.detail;
+  byId('in-state').textContent = `${step.input ?? 0} / ${ringSlots}`;
+  byId('out-state').textContent = `${step.output ?? 0} / ${ringSlots}`;
+  byId('work-label').textContent = mode === 'local' ? 'Matching' : 'Log / matching';
+  byId('work-state').textContent = step.work ?? '—';
+  showMarks('in', step.input ?? 0);
+  showMarks('out', step.output ?? 0);
+  if (mode === 'replica') {
+    byId('gate').querySelector('.detail').textContent = step.votes === undefined
+      ? layouts.replica.nodes.gate[3]
+      : `${step.votes} / ${replicas} durable for this batch`;
+    showMarks('gate', step.votes ?? 0, replicas);
+  }
+  byId('scrub').max = steps().length - 1;
+  byId('scrub').value = index;
+  byId('scrub').setAttribute('aria-valuetext', `Step ${index + 1} of ${steps().length}: ${step.title}`);
+  byId('previous').disabled = index === 0;
+  byId('next').disabled = index === steps().length - 1;
+  byId('play').textContent = playing ? 'Pause' : index === steps().length - 1 ? 'Replay' : 'Play';
+  drawRoutes();
+  if (animate) pulse(step);
+}
+
+function pause() {
+  clearTimeout(timer);
+  playing = false;
+}
+
+function advance() {
+  if (index === steps().length - 1) {
+    pause();
+    showStep(false);
+    return;
+  }
+  timer = setTimeout(() => {
+    index += 1;
+    showStep();
+    advance();
+  }, 2500 / Number(byId('speed').value));
+}
+
+function seek(position) {
+  pause();
+  index = position;
+  showStep();
+}
+
+function configure() {
+  pause();
+  clearPackets();
+  index = 0;
+  byId('summary').textContent = layouts[mode].summary;
+  for (const button of document.querySelectorAll('[data-mode]')) {
+    button.setAttribute('aria-pressed', button.dataset.mode === mode);
+  }
+  const group = byId('scenarios');
+  const focused = group.contains(document.activeElement);
+  group.replaceChildren(...Object.keys(scenarios[mode]).map((name) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = name;
+    button.setAttribute('aria-pressed', name === scenario);
+    button.onclick = () => {
+      scenario = name;
+      configure();
+    };
+    return button;
+  }));
+  if (focused) group.querySelector('[aria-pressed="true"]').focus();
+  setupNodes();
+  showStep(false);
+}
+
+for (const button of document.querySelectorAll('[data-mode]')) {
+  button.onclick = () => {
+    mode = button.dataset.mode;
+    if (!scenarios[mode][scenario]) scenario = 'Follow an order';
+    configure();
+  };
+}
+byId('play').onclick = () => {
+  if (playing) {
+    pause();
+    clearPackets();
+    showStep(false);
+    return;
+  }
+  if (index === steps().length - 1) index = 0;
+  playing = true;
+  showStep(false);
+  advance();
+};
+byId('previous').onclick = () => seek(index - 1);
+byId('next').onclick = () => seek(index + 1);
+byId('scrub').oninput = (event) => seek(Number(event.target.value));
+byId('speed').onchange = () => {
+  if (playing) {
+    clearTimeout(timer);
+    advance();
+  }
+};
+new ResizeObserver(() => {
+  clearPackets();
+  drawRoutes();
+}).observe(byId('map'));
+reducedMotion.addEventListener('change', clearPackets);
+configure();
+</script>
+</body>
+</html>
