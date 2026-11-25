@@ -216,9 +216,16 @@ struct Session
     const std::int64_t epoch = elapsed_ns / kSecondNs;
     const std::int64_t worker =
         (p_options.worker_ + kWorkerCount - epoch % kWorkerCount) % kWorkerCount;
-    const std::int64_t before = WorkerShare(offset_ns * p_options.extra_rate_ / kSecondNs, worker);
+    // Carry rate fractions through successive burst windows.
+    const std::int64_t burst_start_ns = epoch * (kBurstEndNs - kBurstStartNs);
+    const std::int64_t burst_elapsed_ns = burst_start_ns + offset_ns;
+    const std::int64_t initial =
+        WorkerShare(burst_start_ns * p_options.extra_rate_ / kSecondNs, worker);
+    const std::int64_t before =
+        WorkerShare(burst_elapsed_ns * p_options.extra_rate_ / kSecondNs, worker) - initial;
     const std::int64_t after =
-        WorkerShare((offset_ns + kTickNs) * p_options.extra_rate_ / kSecondNs, worker);
+        WorkerShare((burst_elapsed_ns + kTickNs) * p_options.extra_rate_ / kSecondNs, worker) -
+        initial;
     const std::int64_t first = (epoch * p_metrics.burst_subset_) % count;
     for (std::int64_t ordinal = before; ordinal < after; ++ordinal)
     {

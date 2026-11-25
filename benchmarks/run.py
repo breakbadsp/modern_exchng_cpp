@@ -114,7 +114,7 @@ def run_case(args, library, case):
     result = active.case(args.build, library, case.sessions, args.seconds, case.base, case.burst,
                          hot_symbol=case.scenario == "hot-symbol", io=args.io)
     expected_base = case.base * args.seconds
-    expected_burst = args.seconds * (case.burst // 5)
+    expected_burst = args.seconds * case.burst // 5
     if (result["sessions"] != case.sessions or result["base_orders"] != expected_base
             or result["burst_orders"] != expected_burst or result["min_orders_per_session"] < 1):
         raise RuntimeError(f"Incomplete active run: {result}")
