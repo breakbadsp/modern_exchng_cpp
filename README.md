@@ -73,6 +73,10 @@ The io_uring backend needs liburing (`pkg-config liburing`) to build; see [Clien
 ./build/mex_loadgen --port 9000 --session alice --token alice-secret --symbols 1,2,3 --orders 1000000
 ```
 
+Open the [threading animation](docs/threading-model.html) in a browser to
+follow an order, see queue pressure, and compare standalone and replicated
+mode. Open the file from a local checkout for playback.
+
 The session owns its resting orders and its request numbers. Each run starts at request number 1, so a second run on the same session and exchange fails with a `DuplicateRequest` reject. Restart the exchange or use another session.
 
 ## Formatting

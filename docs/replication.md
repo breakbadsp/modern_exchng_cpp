@@ -45,12 +45,17 @@ starts it again, and compares the state of all three.
 
 ## Design
 
+The [threading animation](threading-model.html) shows the path from the
+gateway through the commit gate and back to the client. Open the file in a
+browser from a local checkout.
+
 ```
 client -> Gateway -> inbound queues -> ReplicationBridge -> libvsr cluster
 libvsr commit -> ExchangeStateMachine -> engines -> outbound queues -> Gateway -> client
 ```
 
-Each replica process has three threads:
+Each replica process has three worker threads. The main thread starts and
+joins them.
 
 - `mex-gateway`: the gateway, not changed. It checks each order and queues it.
 - `mex-bridge`: `ReplicationBridge`. It packs the queued orders into a batch
