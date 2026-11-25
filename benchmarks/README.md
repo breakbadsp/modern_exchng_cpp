@@ -29,6 +29,10 @@ Use a new output directory for each run.
 
 The stress suite tests larger connection counts, higher base rates, and
 several closed-loop windows. To test one dimension, use a custom matrix.
+For active workloads, `--burst 0` disables bursts. A positive burst rate
+must be at least 5 ops/s so each 200 ms interval can contain an extra
+operation. For reconnect workloads, the cohort must fit within the
+logged-on idle sessions.
 
 ```sh
 python3 -B benchmarks/run.py --scenario active --sessions 1024 4096 8192 \

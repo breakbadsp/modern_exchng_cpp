@@ -22,7 +22,8 @@ constexpr std::int64_t kBurstStartNs = 400'000'000;
 constexpr std::int64_t kBurstEndNs = 600'000'000;
 constexpr std::size_t kBurstFraction = 20;
 constexpr mex::wire::SymbolId kFirstSymbol = 101;
-constexpr std::size_t kWorkerCount = 3;
+constexpr std::int64_t kWorkerCount = 3;
+constexpr int kOrderPrefixShift = 32;
 constexpr std::size_t kReceiveBytes = 512;
 constexpr int kEventLimit = 256;
 constexpr std::int64_t kDrainTimeoutNs = 2 * kSecondNs;
@@ -68,6 +69,7 @@ struct Session
 {
   int fd_;
   mex::wire::SymbolId symbol_;
+  mex::wire::ClientOrderId order_prefix_;
   std::uint64_t sent_ = 0;
   std::uint64_t received_ = 0;
   std::size_t partial_size_ = 0;
@@ -82,23 +84,38 @@ struct Session
       .count();
 }
 
+// Divide cumulative operation counts so rate rounding cannot lose requests.
+[[nodiscard]] constexpr std::int64_t WorkerShare(std::int64_t p_total, std::int64_t p_worker)
+{
+  return (p_total + kWorkerCount - 1 - p_worker) / kWorkerCount;
+}
+
+[[nodiscard]] constexpr mex::wire::ClientOrderId ClientOrderIdFor(const Session &p_session,
+                                                                  std::uint64_t p_ordinal)
+{
+  return p_session.order_prefix_ | p_ordinal;
+}
+
 [[nodiscard]] std::expected<void, int> Send(Session &p_session, Stamp p_stamp, Metrics &p_metrics)
 {
   const std::uint64_t ordinal = p_session.sent_ + 1;
   std::array<std::byte, mex::wire::kMaxFrameSize> frame{};
   const std::size_t size =
-      ordinal % 2 != 0 ? mex::wire::Encode(mex::wire::NewOrder{.request_number_ = {ordinal},
-                                                               .client_order_id_ = ordinal,
-                                                               .symbol_id_ = p_session.symbol_,
-                                                               .side_ = mex::Side::Buy,
-                                                               .type_ = mex::wire::OrderType::Limit,
-                                                               .price_ = {100},
-                                                               .qty_ = {1}},
-                                           frame)
-                       : mex::wire::Encode(mex::wire::Cancel{.request_number_ = {ordinal},
-                                                             .client_order_id_ = ordinal - 1,
-                                                             .symbol_id_ = p_session.symbol_},
-                                           frame);
+      ordinal % 2 != 0
+          ? mex::wire::Encode(
+                mex::wire::NewOrder{.request_number_ = {ordinal},
+                                    .client_order_id_ = ClientOrderIdFor(p_session, ordinal),
+                                    .symbol_id_ = p_session.symbol_,
+                                    .side_ = mex::Side::Buy,
+                                    .type_ = mex::wire::OrderType::Limit,
+                                    .price_ = {100},
+                                    .qty_ = {1}},
+                frame)
+          : mex::wire::Encode(
+                mex::wire::Cancel{.request_number_ = {ordinal},
+                                  .client_order_id_ = ClientOrderIdFor(p_session, ordinal - 1),
+                                  .symbol_id_ = p_session.symbol_},
+                frame);
   p_stamp.sent_ns_ = NowNs();
   if (::send(p_session.fd_, frame.data(), size, MSG_NOSIGNAL) != static_cast<ssize_t>(size))
   {
@@ -116,11 +133,11 @@ struct Session
   if (ordinal % 2 != 0)
   {
     const auto *const ack = std::get_if<mex::wire::Ack>(&p_report);
-    return ack != nullptr && ack->client_order_id_ == ordinal &&
+    return ack != nullptr && ack->client_order_id_ == ClientOrderIdFor(p_session, ordinal) &&
            ack->symbol_id_ == p_session.symbol_ && ack->leaves_.units_ == 1;
   }
   const auto *const ack = std::get_if<mex::wire::CancelAck>(&p_report);
-  return ack != nullptr && ack->client_order_id_ == ordinal - 1 &&
+  return ack != nullptr && ack->client_order_id_ == ClientOrderIdFor(p_session, ordinal - 1) &&
          ack->symbol_id_ == p_session.symbol_;
 }
 
@@ -183,7 +200,8 @@ struct Session
   const bool burst =
       p_options.extra_rate_ > 0 && kBurstStartNs <= phase_ns && phase_ns < kBurstEndNs;
   const auto count = static_cast<std::int64_t>(p_sessions.size());
-  const std::int64_t target = (elapsed_ns + kTickNs) * p_options.base_rate_ / kSecondNs;
+  const std::int64_t offered_base = (elapsed_ns + kTickNs) * p_options.base_rate_ / kSecondNs;
+  const std::int64_t target = WorkerShare(offered_base, p_options.worker_);
   for (; p_metrics.base_orders_ < target; ++p_metrics.base_orders_)
   {
     const auto index = static_cast<std::size_t>(p_metrics.base_orders_ % count);
@@ -195,9 +213,13 @@ struct Session
   if (burst)
   {
     const std::int64_t offset_ns = phase_ns - kBurstStartNs;
-    const std::int64_t before = offset_ns * p_options.extra_rate_ / kSecondNs;
-    const std::int64_t after = (offset_ns + kTickNs) * p_options.extra_rate_ / kSecondNs;
-    const std::int64_t first = (elapsed_ns / kSecondNs * p_metrics.burst_subset_) % count;
+    const std::int64_t epoch = elapsed_ns / kSecondNs;
+    const std::int64_t worker =
+        (p_options.worker_ + kWorkerCount - epoch % kWorkerCount) % kWorkerCount;
+    const std::int64_t before = WorkerShare(offset_ns * p_options.extra_rate_ / kSecondNs, worker);
+    const std::int64_t after =
+        WorkerShare((offset_ns + kTickNs) * p_options.extra_rate_ / kSecondNs, worker);
+    const std::int64_t first = (epoch * p_metrics.burst_subset_) % count;
     for (std::int64_t ordinal = before; ordinal < after; ++ordinal)
     {
       const auto index =
@@ -304,11 +326,12 @@ extern "C" int MexActiveLoop(const int *p_fds, std::size_t p_count, int p_epoll,
   sessions.reserve(fds.size());
   for (const int fd : fds)
   {
-    const auto index =
-        static_cast<std::size_t>(p_options->worker_) + kWorkerCount * sessions.size();
+    const auto index = static_cast<std::size_t>(p_options->worker_) +
+                       static_cast<std::size_t>(kWorkerCount) * sessions.size();
     const auto symbol_offset =
         static_cast<mex::wire::SymbolId>(p_options->hot_symbol_ != 0 ? 0 : index % 2);
-    sessions.emplace_back(fd, kFirstSymbol + symbol_offset);
+    const auto prefix = (static_cast<mex::wire::ClientOrderId>(index) + 1) << kOrderPrefixShift;
+    sessions.emplace_back(fd, kFirstSymbol + symbol_offset, prefix);
   }
   std::vector<Session *> by_fd(static_cast<std::size_t>(*std::ranges::max_element(fds)) + 1);
   for (auto &session : sessions)
