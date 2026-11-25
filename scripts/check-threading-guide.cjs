@@ -31,6 +31,27 @@ async function check(browser, width, reducedMotion) {
   const next = () => button('Next step').click();
   const choose = (name) => button(name).click();
   const expectText = async (id, expected) => assert.equal(await byId(id).textContent(), expected);
+  const routing = page.getByRole('region', {name: 'Routing by symbol'});
+  assert.equal(await routing.count(), 1);
+  const alice = routing.getByRole('group', {name: 'Alice'});
+  const bob = routing.getByRole('group', {name: 'Bob'});
+  async function checkRouting(mode) {
+    for (const session of [alice, bob]) {
+      assert.match(await session.innerText(), /TCP session\s+Symbol 1\b/);
+    }
+    assert.match(await routing.innerText(), /mex-gateway\s+Commands by symbol · Reports by session/);
+    for (const engine of [0, 1]) {
+      const lane = routing.getByRole('group', {name: `Engine ${engine}`});
+      const reader = mode === 'Standalone' ? `mex-engine-${engine}` : 'mex-bridge';
+      const writer = mode === 'Standalone' ? `mex-engine-${engine}` : 'mex-replica';
+      const symbols = engine === 0 ? 'Symbols 1 and 3' : 'Symbol 2';
+      assert.deepEqual((await lane.innerText()).split('\n'), [
+        `Engine ${engine}`, symbols, 'Command ring', `Gateway → ${reader}`,
+        'Report ring', `${writer} → Gateway`,
+      ]);
+    }
+    assert.equal(await routing.evaluate((element) => element.scrollWidth <= element.clientWidth), true);
+  }
   async function seek(position) {
     // Drive the range with keyboard input, the same path used by a reader.
     await byId('scrub').press('Home');
@@ -38,10 +59,19 @@ async function check(browser, width, reducedMotion) {
   }
 
   await expectText('step-title', 'One resting sell, one incoming buy');
+  await checkRouting('Standalone');
+  assert.match(await bob.innerText(), /Resting sell/);
   assert.match(await byId('apply').textContent(), /mex-engine-0/);
   assert.equal(await page.locator('#routes path').count(), 7);
+  const [apply, outbound, sender, recipient] = await Promise.all(
+    ['apply', 'out', 'tx', 'report'].map((id) => byId(id).boundingBox()),
+  );
+  assert.ok(outbound.y >= apply.y + apply.height, 'The report path stays below the matching thread');
+  assert.equal(outbound.y, sender.y);
+  assert.equal(sender.y, recipient.y);
   await next();
   await expectText('in-state', '1 / 4');
+  assert.match(await alice.innerText(), /Buy sent/);
   assert.equal(await page.locator('.packet').count(), reducedMotion === 'reduce' ? 0 : 1);
   await next();
   await expectText('step-title', 'Engine 0 pops the command');
@@ -52,10 +82,13 @@ async function check(browser, width, reducedMotion) {
   assert.equal(await page.locator('.packet').count(), reducedMotion === 'reduce' ? 0 : 3);
   await next();
   await expectText('out-state', '0 / 4');
+  assert.match(await bob.innerText(), /Maker fill/);
+  assert.match(await alice.innerText(), /Taker fill \+ Ack/);
   assert.equal(await button('Next step').isDisabled(), true);
 
   for (const mode of ['Standalone', 'Replicated']) {
     await choose(mode);
+    await checkRouting(mode);
     await choose('Queue pressure');
     await seek(2);
     await expectText('step-title', 'Full inbound ring returns SystemBusy');
@@ -94,6 +127,9 @@ async function check(browser, width, reducedMotion) {
   assert.equal(await page.locator('#gate .filled').count(), 2);
   await next();
   await expectText('work-state', 'Trade 5 @ 100');
+  await seek(6);
+  assert.match(await bob.innerText(), /Maker fill/);
+  assert.match(await alice.innerText(), /Taker fill \+ Ack/);
 
   await choose('Quorum delay');
   await seek(2);

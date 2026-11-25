@@ -65,6 +65,7 @@
   .node[data-kind="queue"] { --node-color: var(--mint); }
   .node[data-kind="cluster"] { --node-color: var(--amber); }
   .node[data-kind="external"] { --node-color: #bed0ec; }
+  .node[hidden] { display: none; }
   .node.active { border-color: var(--node-color); background: #1a2a41; }
   .node.blocked { --node-color: var(--amber); }
   .node.blocked::after {
@@ -74,9 +75,11 @@
   .node .role { color: var(--node-color); font: 10px/1.15 var(--code); overflow-wrap: anywhere; }
   .node strong { font-size: clamp(12px, 2.4vw, 15px); line-height: 1.15; }
   .node .detail { font-size: 11px; color: var(--quiet); line-height: 1.2; }
+  #client, #rx, #in { grid-row: 1; }
   #apply { grid-area: 2 / 1; }
   #gate { grid-area: 2 / 2; }
   #consume { grid-area: 2 / 3; }
+  #out, #tx, #report { grid-row: 3; }
   #wires { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; }
   .marks { display: flex; gap: 4px; margin-top: 2px; }
   .marks:empty { display: none; }
@@ -102,6 +105,34 @@
   #scrub { flex: 1 1 90px; min-width: 60px; accent-color: var(--cyan); }
   .speed-control { display: flex; align-items: center; gap: 5px; }
   #speed { color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 5px; }
+  .routing { margin-top: 22px; }
+  .routing > p { margin-block: 5px 12px; color: var(--quiet); font-size: 13px; }
+  .topology { padding: clamp(8px, 2.5vw, 20px); background: #080f1d; border: 1px solid var(--line); border-radius: 13px; }
+  .branches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .session, .router, .lane { border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+  .session, .router { padding: 8px; text-align: center; }
+  .session strong, .router strong, .lane strong { display: block; }
+  .session span, .router span, .lane span { display: block; color: var(--quiet); font-size: 12px; }
+  .session .session-event { min-height: 1.5em; color: var(--mint); font-weight: 600; }
+  .session:has(.session-event:not(:empty)) { border-color: var(--mint); }
+  .junction {
+    width: calc(50% + 6px); height: 22px; margin-inline: auto;
+    background:
+      linear-gradient(var(--line), var(--line)) left top / 1px 50% no-repeat,
+      linear-gradient(var(--line), var(--line)) right top / 1px 50% no-repeat,
+      linear-gradient(var(--line), var(--line)) center / 100% 1px no-repeat,
+      linear-gradient(var(--line), var(--line)) center bottom / 1px 50% no-repeat;
+  }
+  .junction.split { transform: scaleY(-1); }
+  .router { width: fit-content; margin-inline: auto; border-color: var(--cyan); }
+  .router strong { color: var(--cyan); }
+  .lane { padding: 8px; }
+  .lane:first-child { border-color: var(--mint); }
+  .lane strong { color: var(--violet); }
+  .lane dl { margin: 6px 0 0; display: grid; gap: 6px; }
+  .lane dl > div { padding: 4px 6px; border: 1px dashed var(--line); border-radius: 5px; }
+  .lane dt { color: var(--mint); font-size: 12px; }
+  .lane dd { margin: 0; font: 11px/1.4 var(--code); }
   .notes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
   details { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: #0d1727; }
   summary { cursor: pointer; font-size: 13px; }
@@ -187,6 +218,52 @@
     </div>
   </div>
 
+  <section class="routing" aria-labelledby="routing-title">
+    <h2 id="routing-title">Routing by symbol</h2>
+    <p>Alice and Bob connect to the same gateway in this example. Both can submit to
+      symbol 1 on Engine 0. Each engine has its own pair of SPSC rings.</p>
+    <div class="topology">
+      <div class="branches">
+        <div class="session" role="group" aria-labelledby="alice-label">
+          <strong id="alice-label">Alice</strong>
+          <span>TCP session</span>
+          <span>Symbol 1</span>
+          <span class="session-event" id="alice-event"></span>
+        </div>
+        <div class="session" role="group" aria-labelledby="bob-label">
+          <strong id="bob-label">Bob</strong>
+          <span>TCP session</span>
+          <span>Symbol 1</span>
+          <span class="session-event" id="bob-event"></span>
+        </div>
+      </div>
+      <div class="junction" aria-hidden="true"></div>
+      <div class="router">
+        <strong class="mono">mex-gateway</strong>
+        <span>Commands by symbol · Reports by session</span>
+      </div>
+      <div class="junction split" aria-hidden="true"></div>
+      <div class="branches">
+        <div class="lane" data-engine="0" role="group" aria-labelledby="engine-0-label">
+          <strong id="engine-0-label">Engine 0</strong>
+          <span>Symbols 1 and 3</span>
+          <dl>
+            <div><dt>Command ring</dt><dd data-command></dd></div>
+            <div><dt>Report ring</dt><dd data-report></dd></div>
+          </dl>
+        </div>
+        <div class="lane" data-engine="1" role="group" aria-labelledby="engine-1-label">
+          <strong id="engine-1-label">Engine 1</strong>
+          <span>Symbol 2</span>
+          <dl>
+            <div><dt>Command ring</dt><dd data-command></dd></div>
+            <div><dt>Report ring</dt><dd data-report></dd></div>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <div class="notes">
     <details>
       <summary>Who owns the books?</summary>
@@ -208,8 +285,8 @@
         when the ring looks full. Each index has its own cache line.</p>
       <p>Each configured engine has a command ring and a report ring in both
         modes. In replicated mode the bridge polls the command rings in turn,
-        and the replica thread writes to the report rings. The diagram shows one
-        pair. It uses four slots for illustration. Steps show order, with no
+        and the replica thread writes to the report rings. The animation follows
+        Engine 0 and shows four example slots. Steps show order, with no
         measured timing.</p>
     </details>
     <details>
@@ -253,19 +330,22 @@ const ringSlots = 4;
 const replicas = 3;
 
 const commonNodes = {
-  client: ['external', 'CLIENT', 'Send order', 'TCP frame'],
+  client: ['external', 'CLIENT', 'Send order', 'TCP session'],
   rx: ['gateway', 'mex-gateway', 'Read & route', 'Check session and symbol'],
-  in: ['queue', 'SPSC · INBOUND', 'Commands', 'Gateway writes'],
-  out: ['queue', 'SPSC · OUTBOUND', 'Reports', 'Gateway reads'],
+  in: ['queue', 'ENGINE 0 · SPSC', 'Command ring', 'Gateway writes'],
+  out: ['queue', 'ENGINE 0 · SPSC', 'Report ring', 'Gateway reads'],
   tx: ['gateway', 'mex-gateway', 'Drain & write', 'Route by session'],
-  report: ['external', 'CLIENTS', 'Receive reports', 'Maker and taker'],
+  report: ['external', 'CLIENTS', 'Receive reports', 'TCP sessions'],
+};
+const matchNodes = {
+  client: ['external', 'ALICE', 'Send buy', 'TCP session'],
+  report: ['external', 'BOB & ALICE', 'Receive reports', 'Separate TCP sessions'],
 };
 const layouts = {
   local: {
     summary: 'One gateway and one worker per configured engine. Each symbol has one matching owner.',
     nodes: {
       consume: ['worker', 'mex-engine-0', 'Pop command', 'Poll this engine’s ring'],
-      gate: ['worker', 'mex-engine-1', 'Other symbols', 'Independent engine and rings'],
       apply: ['worker', 'mex-engine-0', 'Match on book', 'Apply on the same worker'],
     },
     handoffs: [['consume', 'apply']],
@@ -285,10 +365,11 @@ const inboundPath = [['client', 'rx'], ['rx', 'in'], ['in', 'consume']];
 const outboundPath = [['apply', 'out'], ['out', 'tx'], ['tx', 'report']];
 
 const startMatch = [
-  {title: 'One resting sell, one incoming buy', active: 'client',
-    detail: 'Alice sends a buy for 5 at 100. Bob already has a sell for 5 at 100 on this symbol. Follow the buy to the book and the fills back to both sessions.'},
+  {title: 'One resting sell, one incoming buy', active: 'client', bob: 'Resting sell',
+    detail: 'Alice sends a buy for 5 at 100 on symbol 1. Bob already sent a sell for 5 at 100 through the same command ring. His sell rests on the book.'},
   {title: 'The gateway publishes a command', active: 'in', via: ['client', 'rx', 'in'], input: 1,
-    detail: 'The gateway decodes the frame, checks the order, and selects the ring for this symbol. The consumer can see the command after publication.'},
+    alice: 'Buy sent', bob: 'Resting sell',
+    detail: 'The gateway checks Alice’s order and uses symbol 1 to select Engine 0’s command ring. The command keeps Alice’s session ID for reports.'},
 ];
 const finishMatch = [
   {title: 'The state owner matches at 100', active: 'apply', work: 'Trade 5 @ 100',
@@ -297,8 +378,8 @@ const finishMatch = [
     output: 3, packets: 3, work: 'Trade 5 @ 100',
     detail: 'The engine writes Bob’s maker fill, Alice’s taker fill, and Alice’s Ack with zero leaves to the outbound ring.'},
   {title: 'The gateway delivers by session', active: 'report', via: ['out', 'tx', 'report'], tone: 'report', packets: 3,
-    work: 'Trade 5 @ 100',
-    detail: 'The gateway pops the reports, assigns wire sequence numbers per session, and sends them to local connections. In a cluster, Bob and Alice can receive reports from different replicas.'},
+    work: 'Trade 5 @ 100', alice: 'Taker fill + Ack', bob: 'Maker fill',
+    detail: 'The gateway pops the reports and sends Bob’s fill on Bob’s TCP connection. It sends Alice’s fill and Ack on Alice’s connection. Each session has its own wire sequence.'},
 ];
 
 const pressure = [
@@ -387,12 +468,25 @@ function steps() {
 }
 
 function setupNodes() {
-  for (const [id, [kind, role, title, detail]] of Object.entries({...commonNodes, ...layouts[mode].nodes})) {
+  byId('gate').hidden = mode === 'local';
+  const participants = scenario === 'Follow an order' ? matchNodes : {};
+  const nodes = {...commonNodes, ...layouts[mode].nodes, ...participants};
+  for (const [id, [kind, role, title, detail]] of Object.entries(nodes)) {
     const node = byId(id);
     node.dataset.kind = kind;
     // These labels come only from the diagram definitions above.
     node.innerHTML = '<span class="role"></span><strong></strong><span class="detail"></span><span class="marks" aria-hidden="true"></span>';
     [role, title, detail].forEach((value, position) => { node.children[position].textContent = value; });
+  }
+}
+
+function setupRouting() {
+  for (const lane of document.querySelectorAll('[data-engine]')) {
+    const worker = `mex-engine-${lane.dataset.engine}`;
+    const reader = mode === 'local' ? worker : 'mex-bridge';
+    const writer = mode === 'local' ? worker : 'mex-replica';
+    lane.querySelector('[data-command]').textContent = `Gateway → ${reader}`;
+    lane.querySelector('[data-report]').textContent = `${writer} → Gateway`;
   }
 }
 
@@ -422,12 +516,8 @@ function drawRoutes(step = steps()[index]) {
       : (start.y < end.y ? ['bottom', 'top'] : ['top', 'bottom']);
     const a = point(from, edges[0]);
     const b = point(to, edges[1]);
-    const bypass = mode === 'local' && from === 'consume';
-    const detour = point(from, 'bottom').y + 11;
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    line.setAttribute('d', bypass
-      ? `M ${start.x} ${point(from, 'bottom').y} V ${detour} H ${end.x} V ${point(to, 'bottom').y}`
-      : `M ${a.x} ${a.y} L ${b.x} ${b.y}`);
+    line.setAttribute('d', `M ${a.x} ${a.y} L ${b.x} ${b.y}`);
     const live = isActive(from, to);
     const color = step.tone === 'report' ? 'var(--mint)' : step.tone === 'wait' ? 'var(--amber)' : 'var(--cyan)';
     line.setAttribute('fill', 'none');
@@ -446,15 +536,7 @@ function clearPackets() {
 function pulse(step) {
   clearPackets();
   if (!step.via || reducedMotion.matches) return;
-  const points = [];
-  for (const [position, id] of step.via.entries()) {
-    const prior = step.via[position - 1];
-    if (mode === 'local' && prior === 'consume' && id === 'apply') {
-      const y = point(prior, 'bottom').y + 11;
-      points.push({x: point(prior).x, y}, {x: point(id).x, y});
-    }
-    points.push(point(id));
-  }
+  const points = step.via.map((id) => point(id));
   const keyframes = points.map(({x, y}, i) => ({
     transform: `translate(${x}px, ${y}px)`, opacity: i === points.length - 1 ? 0 : 1, visibility: 'visible',
   }));
@@ -490,6 +572,8 @@ function showStep(animate = true) {
   byId('step-index').textContent = `STEP ${index + 1} / ${steps().length}`;
   byId('step-title').textContent = step.title;
   byId('step-detail').textContent = step.detail;
+  byId('alice-event').textContent = step.alice ?? '';
+  byId('bob-event').textContent = step.bob ?? '';
   byId('in-state').textContent = `${step.input ?? 0} / ${ringSlots}`;
   byId('out-state').textContent = `${step.output ?? 0} / ${ringSlots}`;
   byId('work-label').textContent = mode === 'local' ? 'Matching' : 'Log / matching';
@@ -559,6 +643,7 @@ function configure() {
   }));
   if (focused) group.querySelector('[aria-pressed="true"]').focus();
   setupNodes();
+  setupRouting();
   showStep(false);
 }
 
