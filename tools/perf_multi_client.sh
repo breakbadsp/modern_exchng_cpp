@@ -78,22 +78,30 @@ wait "$exchange" || exchange_rc=$?
 exchange=
 
 # Total ops/s uses wall time over all clients. p50 is the median client's p50;
-# p99 is the worst client's p99.
+# p99 is the worst client's p99; p100 is the largest sample across all clients.
 python3 - "$work" "$clients" "$start" "$end" "$failed" "$exchange_rc" <<'PY'
 import re, sys
 work, clients, start, end, failed, exchange_rc = sys.argv[1:]
-ops, p50, p99 = 0, [], []
+ops, system_busy, samples, p50, p99, p100 = 0, 0, 0, [], [], []
 for i in range(int(clients)):
     text = open(f"{work}/client{i}.log").read()
     m = re.search(r"sent (\d+) operations", text)
-    ops += int(m.group(1)) if m else 0
-    m = re.search(r"p50 ([\d.]+) us, p99 ([\d.]+) us", text)
-    if m:
-        p50.append(float(m.group(1)))
-        p99.append(float(m.group(2)))
+    busy = re.search(r"Reject SystemBusy (\d+)", text)
+    latency = re.search(
+        r"p50 ([\d.]+) us, p99 ([\d.]+) us, max ([\d.]+) us \((\d+) samples\)", text
+    )
+    if not (m and busy and latency):
+        sys.exit(f"client {i} did not complete the measurement:\n{text}")
+    ops += int(m[1])
+    system_busy += int(busy[1])
+    p50.append(float(latency[1]))
+    p99.append(float(latency[2]))
+    p100.append(float(latency[3]))
+    samples += int(latency[4])
 wall = float(end) - float(start)
 print(f"clients={clients} ops={ops} total_ops_s={ops / wall:,.0f} "
       f"p50_us={sorted(p50)[len(p50) // 2] if p50 else 0:.1f} p99_us={max(p99) if p99 else 0:.1f} "
+      f"p100_us={max(p100):.1f} samples={samples} system_busy={system_busy} "
       f"client_failed={failed} exchange_rc={exchange_rc}")
 PY
 grep -E 'stalls|dropped' "$work/exchange.log" || true
