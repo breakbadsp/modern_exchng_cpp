@@ -66,6 +66,11 @@
   .node[data-kind="cluster"] { --node-color: var(--amber); }
   .node[data-kind="external"] { --node-color: #bed0ec; }
   .node.active { border-color: var(--node-color); background: #1a2a41; }
+  .node.blocked { --node-color: var(--amber); }
+  .node.blocked::after {
+    content: ''; position: absolute; top: 7px; right: 7px; width: 6px; height: 6px;
+    border-radius: 50%; background: var(--amber); box-shadow: 0 0 9px var(--amber);
+  }
   .node .role { color: var(--node-color); font: 10px/1.15 var(--code); overflow-wrap: anywhere; }
   .node strong { font-size: clamp(12px, 2.4vw, 15px); line-height: 1.15; }
   .node .detail { font-size: 11px; color: var(--quiet); line-height: 1.2; }
@@ -301,9 +306,9 @@ const pressure = [
     detail: 'The gateway can keep taking orders while the consumer is busy. Three of the four example slots hold commands.'},
   {title: 'The last free command slot fills', active: 'in', via: ['rx', 'in'], input: 4,
     detail: 'The bounded command ring reaches capacity. The next order for this engine needs a free slot.'},
-  {title: 'Full inbound ring returns SystemBusy', active: 'rx', via: ['in', 'rx', 'client'], tone: 'wait', input: 4,
+  {title: 'Full inbound ring returns SystemBusy', active: 'rx', via: ['rx', 'client'], tone: 'wait', input: 4,
     detail: 'The failed push leaves the ring intact. The gateway makes the reject on its own thread and sends it to the submitting session.'},
-  {title: 'Full outbound ring stalls the producer', active: 'out', via: ['apply', 'out'], tone: 'wait', output: 4,
+  {title: 'Full outbound ring stalls the producer', active: 'apply', blocked: true, output: 4, work: 'Waiting for a report slot',
     detail: 'In this separate example, a match has reports ready to send. The next report has no free slot. The matching thread spins in Engine::Emit until it can publish that report.'},
   {title: 'The gateway frees a report slot', active: 'tx', via: ['out', 'tx'], tone: 'report', output: 3,
     detail: 'The gateway pops independently of the matching thread. This step shows the slot before the waiting producer reuses it.'},
@@ -477,7 +482,10 @@ function showMarks(id, count, total = ringSlots) {
 function showStep(animate = true) {
   const step = steps()[index];
   for (const node of document.querySelectorAll('.node')) {
-    node.classList.toggle('active', node.id === step.active || Boolean(step.via?.includes(node.id)));
+    const stalled = step.blocked && node.id === 'apply';
+    const fullRing = step.blocked && node.id === 'out';
+    node.classList.toggle('active', node.id === step.active || Boolean(step.via?.includes(node.id)) || Boolean(fullRing));
+    node.classList.toggle('blocked', Boolean(stalled));
   }
   byId('step-index').textContent = `STEP ${index + 1} / ${steps().length}`;
   byId('step-title').textContent = step.title;

@@ -15,6 +15,15 @@ async function check(browser, width, reducedMotion) {
   page.on('request', (request) => {
     if (!request.url().startsWith('file:')) externalRequests.push(request.url());
   });
+  await page.addInitScript(() => {
+    const animate = Element.prototype.animate;
+    Element.prototype.animate = function (...args) {
+      const animation = animate.apply(this, args);
+      // Hold packet animations for inspection. Browser delays cannot remove them.
+      if (this.classList.contains('packet')) animation.pause();
+      return animation;
+    };
+  });
   await page.goto(guide);
 
   const byId = (id) => page.locator(`#${id}`);
@@ -51,9 +60,13 @@ async function check(browser, width, reducedMotion) {
     await seek(2);
     await expectText('step-title', 'Full inbound ring returns SystemBusy');
     await expectText('in-state', '4 / 4');
+    assert.equal(await page.locator('#routes path[stroke-width="2"]').count(), 1,
+      'Only the gateway-to-client path carries the reject');
     await next();
     await expectText('step-title', 'Full outbound ring stalls the producer');
     await expectText('out-state', '4 / 4');
+    assert.equal(await page.locator('.packet').count(), 0);
+    assert.equal(await page.locator('#apply.blocked').count(), 1);
     await next();
     await expectText('out-state', '3 / 4');
     await next();
