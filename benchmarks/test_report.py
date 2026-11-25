@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from report import classify, limits, rate_limits
-from run import Case, record_case, validate
+from run import Case, record_case, run_case, validate
 
 
 class RunnerTest(unittest.TestCase):
@@ -19,6 +19,14 @@ class RunnerTest(unittest.TestCase):
                     validate(args, [Case("reconnect", 64, 400_000, 512)], parser)
                 reject.assert_called_once()
                 self.assertIn("Invalid benchmark setting", reject.call_args.args[0])
+
+    def test_burst_rate_fraction_carries_across_windows(self):
+        args = argparse.Namespace(build=Path("/unused"), seconds=5, io="epoll")
+        case = Case("active", 3, 2, 9)
+        result = {"sessions": 3, "base_orders": 10, "burst_orders": 9,
+                  "min_orders_per_session": 3, "scheduled_p100_ms": 15}
+        with patch("run.active.case", return_value=result):
+            self.assertEqual(run_case(args, None, case)["burst_orders"], 9)
 
     def test_worker_timeout_is_a_case_outcome(self):
         case = Case("active", 64, 100_000)
