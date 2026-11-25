@@ -67,7 +67,7 @@ def requested_cases(args):
         return [Case(args.scenario, count, window=window)
                 for count in counts for window in (args.windows or [64, 512, 4096])]
     if args.scenario == "reconnect":
-        return [Case("reconnect", count, 400_000, args.burst if args.burst is not None else 512)
+        return [Case("reconnect", count, 400_000, args.burst if args.burst is not None else min(512, count - reconnect.ACTIVE))
                 for count in counts]
     return [Case(args.scenario, count, base, args.burst if args.burst is not None else 100_000)
             for count in counts for base in (args.rates or [400_000])]
@@ -99,6 +99,8 @@ def reconnect_case(build, case, io):
     finally:
         os.sched_setaffinity(0, affinity)
     steady, churn = result["steady"], result["reconnect"]
+    if churn["reconnected"] != case.burst:
+        raise RuntimeError(f"Expected {case.burst} reconnects, observed {churn['reconnected']}")
     return {"offered_ops_s": case.base, "ops_s": min(steady["ops_s"], churn["ops_s"]),
             "order_p100_ms": max(steady["order_p100_ms"], churn["order_p100_ms"]),
             "logon_p100_ms": churn["reconnect_p100_ms"], **result}
@@ -112,8 +114,7 @@ def run_case(args, library, case):
     result = active.case(args.build, library, case.sessions, args.seconds, case.base, case.burst,
                          hot_symbol=case.scenario == "hot-symbol", io=args.io)
     expected_base = case.base * args.seconds
-    expected_burst = args.seconds * sum((case.burst + n) // active.WORKERS // 5
-                                       for n in range(active.WORKERS))
+    expected_burst = args.seconds * (case.burst // 5)
     if (result["sessions"] != case.sessions or result["base_orders"] != expected_base
             or result["burst_orders"] != expected_burst or result["min_orders_per_session"] < 1):
         raise RuntimeError(f"Incomplete active run: {result}")
@@ -162,10 +163,12 @@ def validate(args, cases, parser):
         if case.scenario == "saturation":
             valid = 1 <= case.sessions <= 8 and 1 <= case.window <= args.orders
         elif case.scenario == "reconnect":
-            valid = reconnect.ACTIVE < case.sessions <= MAX_SESSIONS and 1 <= case.burst <= 1024
+            valid = (reconnect.ACTIVE < case.sessions <= MAX_SESSIONS
+                     and 1 <= case.burst <= min(1024, case.sessions - reconnect.ACTIVE))
         else:
             valid = (3 <= case.sessions <= MAX_SESSIONS and 1 <= case.base <= 2_000_000
-                     and 0 <= case.burst <= 2_000_000 and case.base * args.seconds >= case.sessions + 2)
+                     and (case.burst == 0 or 5 <= case.burst <= 2_000_000)
+                     and case.base * args.seconds >= case.sessions)
         if not valid:
             parser.error(f"Invalid benchmark setting: {case}")
     if not (args.build / "mex_exchange").is_file():
@@ -173,6 +176,16 @@ def validate(args, cases, parser):
     if any(case.scenario in ("reconnect", "saturation") for case in cases):
         if not (args.build / "mex_loadgen").is_file():
             parser.error(f"Build mex_loadgen first in {args.build}.")
+
+
+def record_case(args, library, case, repeat):
+    row = {"scenario": case.scenario, "sessions": case.sessions, "base": case.base,
+           "burst": case.burst, "window": case.window, "repeat": repeat}
+    try:
+        row.update(run_case(args, library, case), status="complete")
+    except (RuntimeError, OSError, TimeoutError, subprocess.TimeoutExpired, ExceptionGroup) as exc:
+        row.update(status="invalid", error=str(exc))
+    return row
 
 
 def main():
@@ -216,13 +229,8 @@ def main():
             active.compile_loop(library)
         for repeat in range(1, args.repeat + 1):
             for case in cases:
-                row = {"scenario": case.scenario, "sessions": case.sessions, "base": case.base,
-                       "burst": case.burst, "window": case.window, "repeat": repeat}
                 print(f"Run {repeat} · {case.scenario} · {case.sessions:,} sessions", file=sys.stderr)
-                try:
-                    row.update(run_case(args, library, case), status="complete")
-                except (RuntimeError, OSError, TimeoutError, ExceptionGroup) as exc:
-                    row.update(status="invalid", error=str(exc))
+                row = record_case(args, library, case, repeat)
                 row["classification"] = classify(row, args.target_ms)
                 runs.append(row)
                 print(json.dumps(row), file=journal, flush=True)

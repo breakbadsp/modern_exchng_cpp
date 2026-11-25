@@ -1,6 +1,31 @@
+import argparse
+from pathlib import Path
+import subprocess
 import unittest
+from unittest.mock import patch
 
 from report import classify, limits, rate_limits
+from run import Case, record_case, validate
+
+
+class RunnerTest(unittest.TestCase):
+    def test_reconnect_cohort_must_fit_the_idle_sessions(self):
+        args = argparse.Namespace(repeat=1, seconds=1, target_ms=100, orders=100,
+                                  build=Path("/unused"))
+        parser = argparse.ArgumentParser()
+        with patch("run.os.sched_getaffinity", return_value=set(range(6))):
+            with patch.object(parser, "error", side_effect=ValueError) as reject:
+                with self.assertRaises(ValueError):
+                    validate(args, [Case("reconnect", 64, 400_000, 512)], parser)
+                reject.assert_called_once()
+                self.assertIn("Invalid benchmark setting", reject.call_args.args[0])
+
+    def test_worker_timeout_is_a_case_outcome(self):
+        case = Case("active", 64, 100_000)
+        with patch("run.run_case", side_effect=subprocess.TimeoutExpired("exchange", 15)):
+            row = record_case(None, None, case, 1)
+        self.assertEqual(row["status"], "invalid")
+        self.assertIn("timed out", row["error"])
 
 
 class LimitTest(unittest.TestCase):

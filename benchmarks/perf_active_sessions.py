@@ -99,7 +99,7 @@ def clients(library, port, count, seconds, base, extra, hot_symbol):
             parent, child = context.Pipe()
             process = context.Process(target=worker, args=(
                 child, library, port, range(cpu, count, WORKERS), cpu, seconds,
-                (base + cpu) // WORKERS, (extra + cpu) // WORKERS, hot_symbol,
+                base, extra, hot_symbol,
             ))
             process.start()
             machines.append(process)
