@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""Run bounded models and implementation tests from the verification catalog."""
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parent
+REPO = ROOT.parents[1]
+OUT = ROOT / ".tools"
+CATALOG = ROOT / "catalog.json"
+TLC_SHA256 = "fdffef247f563ef6edbfd44958d2a82db79e7564e07cb673262d896353fa6713"
+TLC_URL = "https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar"
+TIMEOUT = 1200
+
+
+def run(command, **kwargs):
+    return subprocess.run(command, timeout=TIMEOUT, text=True, **kwargs)
+
+
+def java_command():
+    command = [os.environ.get("JAVA", "java")]
+    try:
+        if run([*command, "-version"], capture_output=True).returncode == 0:
+            return command
+    except FileNotFoundError:
+        pass
+    return ["mise", "exec", "java@temurin-25", "--", "java"]
+
+
+def tlc(module, config, expected=None, trace=None):
+    jar = OUT / "tla-release/tla2tools.jar"
+    jar.parent.mkdir(exist_ok=True)
+    if not jar.exists():
+        download = jar.with_suffix(".part")
+        run(["curl", "-fLsS", TLC_URL, "-o", download], check=True)
+        if hashlib.sha256(download.read_bytes()).hexdigest() != TLC_SHA256:
+            download.unlink()
+            raise ValueError("TLA+ 1.8.0 archive checksum mismatch")
+        download.replace(jar)
+    name = f"{module.stem}-{config.stem}"
+    command = [
+        *java_command(), "-XX:+UseParallelGC", "-Xmx2g", "-cp", jar, "tlc2.TLC",
+        "-workers", os.environ.get("TLC_WORKERS", "2"), "-noGenerateSpecTE",
+        "-metadir", OUT / "states" / name, "-config", config,
+    ]
+    if trace:
+        trace.unlink(missing_ok=True)
+        command.extend(["-dumpTrace", "json", trace])
+    with (OUT / f"{name}.log").open("w") as log:
+        result = run([*command, module], cwd=module.parent, stdout=log, stderr=subprocess.STDOUT)
+    log_path = OUT / f"{name}.log"
+    report = log_path.read_text()
+    if expected:
+        ok = result.returncode == 12 and f"Error: Invariant {expected} is violated." in report
+    else:
+        ok = result.returncode == 0 and "0 states left on queue" in report
+    if not ok or (trace is not None and not trace.is_file()):
+        print("\n".join(report.splitlines()[-40:]), file=sys.stderr)
+        raise ValueError(f"Unexpected TLC result: {log_path}")
+    summary = next(line for line in reversed(report.splitlines()) if "distinct states found" in line)
+    print(f"{name}: {summary}" + (f" ({expected} detected)" if expected else ""), flush=True)
+
+
+def matching_binary(source, name):
+    binary = OUT / name
+    run([
+        os.environ.get("CXX", "g++"), "-std=c++26", "-fcontracts", "-Wall", "-Wextra",
+        "-Wpedantic", "-Wconversion", "-Wsign-conversion", "-Werror", "-I", REPO / "src",
+        source, ROOT / "matching/replay.cpp", "-o", binary,
+    ], check=True)
+    return binary
+
+
+def replay(binary, case, setup=()):
+    lines = list(setup)
+    lines.extend(" ".join(map(str, step["command"])) for step in case["steps"])
+    result = run([binary], input="\n".join(lines) + "\n", capture_output=True, check=True)
+    expected = [step["expect"] for step in case["steps"]]
+    observed = result.stdout.splitlines()
+    if expected == observed:
+        return None
+    for index, (want, got) in enumerate(zip(expected, observed), 1):
+        if want != got:
+            return f"step {index}\nexpected {want}\nobserved {got}"
+    return f"expected {len(expected)} steps, observed {len(observed)}"
+
+
+def replay_matching(binary, case):
+    return replay(binary, case, [f"{case['capacity']} {case['levels']}"])
+
+
+def report_replay(binary, scenario, driver=replay):
+    error = driver(binary, json.loads(scenario.read_text()))
+    if error:
+        raise ValueError(f"{scenario.name}: {error}")
+    print(f"Replay passed: {scenario.name}", flush=True)
+
+
+def trace_states(trace):
+    actions = json.loads(trace.read_text())["counterexample"]["action"]
+    return [state for _, _, (_, state) in actions]
+
+
+def order_text(order, fields):
+    return ":".join(str(order[field]) for field in fields)
+
+
+def matching_case_from_tlc(trace, capacity):
+    steps = []
+    for state in trace_states(trace):
+        last = state["last"]
+        command = [last["command"][key] for key in ("kind", "id", "side", "price", "qty")]
+        result = f"{int(last['accepted'])} {last['filled']} {last['leaves']}"
+        fills = [order_text(fill, ("id", "price", "qty")) for fill in last["fills"]]
+        book = sorted(state["book"], key=lambda order: (order["side"], order["price"]))
+        orders = [order_text(order, ("id", "side", "price", "qty")) for order in book]
+        expect = " ".join([result, "|", *fills, "|", *orders])
+        steps.append({"command": command, "expect": expect})
+    return {"capacity": capacity, "levels": 2, "steps": steps}
+
+
+def matching_proof():
+    directory = ROOT / "matching"
+    module = directory / "Matching.tla"
+    book = REPO / "src/book.cpp"
+    binary = matching_binary(book, "matching-replay")
+    report_replay(binary, directory / "reduce.json", replay_matching)
+    witnesses = [
+        ("Witness", "BeforeReduceWitness", 3),
+        ("CapacityWitness", "BeforeCapacityWitness", 4),
+        ("SweepWitness", "BeforeSweepWitness", 3),
+    ]
+    for config, invariant, capacity in witnesses:
+        trace = OUT / f"matching-{config}.json"
+        tlc(module, directory / f"{config}.cfg", invariant, trace)
+        case = matching_case_from_tlc(trace, capacity)
+        scenario = OUT / f"matching-{config}-scenario.json"
+        scenario.write_text(json.dumps(case, indent=2) + "\n")
+        report_replay(binary, scenario, replay_matching)
+    tlc(module, directory / "Mutation.cfg", "ReduceKeepsPriority")
+    witness = matching_case_from_tlc(OUT / "matching-Witness.json", 3)
+
+    original = """  const Quantity removed = node.quantity_ - p_new_quantity;
+  contract_assert(level.total_qty_ > removed.units_);
+  level.total_qty_ -= removed.units_;
+  node.quantity_ = p_new_quantity;
+  return true;"""
+    replacement = """  static_cast<void>(level);
+  return ReplaceOrder(p_order_id, node.price_, p_new_quantity).status_ == SubmitStatus::Accepted;"""
+    source = book.read_text()
+    if source.count(original) != 1:
+        raise ValueError("Review the matching mutation after the production code changed")
+    mutant = OUT / "book-mutant.cpp"
+    mutant.write_text(source.replace(original, replacement))
+    error = replay_matching(matching_binary(mutant, "matching-mutant"), witness)
+    if error is None or not error.startswith(f"step {len(witness['steps'])}\n"):
+        raise ValueError(f"Expected the FIFO replay to reject the mutation at reduction: {error}")
+    print("Replay detected the FIFO mutation", flush=True)
+
+
+def bridge_binary(build):
+    return build / "verification/TLA/tla_bridge_replay"
+
+
+def bridge_proof(module, build):
+    trace = OUT / "bridge-witness.json"
+    tlc(module, module.with_name("BridgeWitness.cfg"), "BeforeEvictionWitness", trace)
+    steps = []
+    for state in trace_states(trace):
+        event = state["event"]
+        command = [event]
+        expected = [event]
+        if event == "enqueue":
+            command.append(state["issued"])
+        elif event == "send":
+            expected.extend(map(str, state["pending"]))
+        else:
+            expected = ["resume"]
+        expected.extend(("|", str(len(state["abandoned"]))))
+        steps.append({"command": command, "expect": " ".join(expected)})
+    generated = OUT / "bridge-scenario.json"
+    generated.write_text(json.dumps({"steps": steps}, indent=2) + "\n")
+    if build is None:
+        print("Use --build to replay the bridge scenarios", flush=True)
+        return
+    for scenario in (ROOT / "bridge/retry.json", generated):
+        report_replay(bridge_binary(build), scenario)
+
+
+def check_vsr(source):
+    if source is None:
+        raise ValueError("Set MEX_LIBVSR_SOURCE_DIR to the pinned libvsr checkout")
+    source = source.resolve()
+    cmake = (REPO / "CMakeLists.txt").read_text()
+    pin = re.search(r"GIT_TAG ([a-f0-9]{40})", cmake)[1]
+    archive = OUT / "libvsr-spec.tar"
+    with archive.open("wb") as output:
+        subprocess.run(["git", "-C", source, "archive", pin, "spec"], stdout=output,
+                       check=True, timeout=TIMEOUT)
+    destination = OUT / pin
+    destination.mkdir(exist_ok=True)
+    run(["tar", "-xf", archive, "-C", destination], check=True)
+    directory = destination / "spec"
+    failures = {"MutA": "LogViewInvariant", "MutB": "DurableCommit", "MutC": "Agreement"}
+    for config in sorted(directory.glob("*.cfg")):
+        tlc(directory / "Vsr.tla", config, failures.get(config.stem.split("_")[0]))
+
+
+def print_kaizen_rules(targets):
+    print("# Generated by verification/TLA/run rules")
+    print("@all\t.kaizen-checks .github/workflows/ci.yml CMakeLists.txt CMakePresets.json "
+          "verification/TLA/run verification/TLA/catalog.json verification/TLA/CMakeLists.txt "
+          "src/types.hpp")
+    print("@skip\t*.md docs/*")
+    for name, entry in targets.items():
+        paths = [*entry["source"]]
+        if name == "matching":
+            paths.append("verification/TLA/matching/*")
+        if name == "bridge":
+            paths.append("verification/TLA/bridge/*")
+        if name != "matching" and "module" in entry:
+            module = Path(entry["module"])
+            paths.append(f"verification/TLA/{module.parent}/{module.stem}*")
+        print(f"tla-{name}\t{' '.join(paths)}\tverification/TLA/run check {name}")
+
+
+def main():
+    targets = json.loads(CATALOG.read_text())
+    parser = argparse.ArgumentParser(description=__doc__)
+    modes = parser.add_subparsers(dest="mode", required=True)
+    check = modes.add_parser("check")
+    selection = check.add_mutually_exclusive_group(required=True)
+    selection.add_argument("target", nargs="?", choices=targets)
+    selection.add_argument("--all", action="store_true")
+    check.add_argument("--build", type=Path, help="Also run the mapped CTest tests from this build")
+    replay_parser = modes.add_parser("replay")
+    replay_parser.add_argument("target", choices=["matching", "bridge"])
+    replay_parser.add_argument("scenario", type=Path)
+    replay_parser.add_argument("--build", type=Path)
+    modes.add_parser("list")
+    modes.add_parser("rules")
+    args = parser.parse_args()
+    if args.mode == "list":
+        for name in targets:
+            print(name)
+        return
+    if args.mode == "rules":
+        print_kaizen_rules(targets)
+        return
+    OUT.mkdir(exist_ok=True)
+    configured = os.environ.get("MEX_VERIFY_BUILD")
+    build = args.build or (Path(configured) if configured else None)
+    if args.mode == "replay":
+        if args.target == "matching":
+            binary = matching_binary(REPO / "src/book.cpp", "matching-replay")
+            report_replay(binary, args.scenario, replay_matching)
+        else:
+            if build is None:
+                raise ValueError("Use --build to locate the bridge replay executable")
+            report_replay(bridge_binary(build), args.scenario)
+        return
+    selected = targets if args.all else [args.target]
+    tests = set()
+    for name in selected:
+        entry = targets[name]
+        if name == "libvsr":
+            source = os.environ.get("MEX_LIBVSR_SOURCE_DIR")
+            check_vsr(Path(source) if source else None)
+        else:
+            module = ROOT / entry["module"]
+            for config in entry["configs"]:
+                tlc(module, module.with_name(config))
+            if mutation := entry.get("mutation"):
+                tlc(module, module.with_name(mutation["config"]), mutation["invariant"])
+        if name == "matching":
+            matching_proof()
+        if name == "bridge":
+            bridge_proof(module, build)
+        tests.update(entry["ctest"])
+    if args.build and tests:
+        pattern = "^(" + "|".join(re.escape(test) for test in sorted(tests)) + ")$"
+        run(["ctest", "--test-dir", args.build, "-R", pattern, "--output-on-failure",
+             "--no-tests=error"], check=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"Verification failed: {error}", file=sys.stderr)
+        sys.exit(1)
