@@ -10,3 +10,6 @@ set_tests_properties(tla_fault_game PROPERTIES TIMEOUT 240)
 
 add_executable(tla_bridge_replay bridge/replay.cpp)
 target_link_libraries(tla_bridge_replay PRIVATE mex)
+
+add_test(NAME tla_runner COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_test.py)
+set_tests_properties(tla_runner PROPERTIES TIMEOUT 100)

@@ -204,7 +204,8 @@ add_test(NAME perf_report COMMAND ${Python3_EXECUTABLE} -B -m unittest discover
 file(GLOB_RECURSE MEX_FORMAT_SOURCES CONFIGURE_DEPENDS
     src/*.cpp src/*.hpp tests/*.cpp tests/*.hpp tools/*.cpp tools/*.hpp benchmarks/*.cpp)
 list(APPEND MEX_FORMAT_SOURCES
-    verification/TLA/matching/replay.cpp verification/TLA/bridge/replay.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/verification/TLA/matching/replay.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/verification/TLA/bridge/replay.cpp)
 option(MEX_REQUIRE_STYLE_TOOLS "Require Universal Ctags for the style test" OFF)
 find_program(CTAGS_EXECUTABLE NAMES ctags-universal universal-ctags ctags)
 if(MEX_REQUIRE_STYLE_TOOLS AND NOT CTAGS_EXECUTABLE)

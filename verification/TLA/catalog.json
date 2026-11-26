@@ -6,12 +6,14 @@
       "Capacity.cfg"
     ],
     "ctest": [
-      "test_book"
+      "test_book",
+      "tla_runner"
     ],
     "source": [
       "src/book.cpp",
       "src/book.hpp",
-      "src/types.hpp"
+      "src/types.hpp",
+      "verification/TLA/run_test.py"
     ],
     "bounds": "Three prices, two quantities, three slots, two levels per side, four commands. Separate five-command case with four slots and two levels."
   },
@@ -28,10 +30,12 @@
       "src/engine.hpp"
     ],
     "bounds": "Two sessions, two client order IDs, two request numbers, one symbol.",
-    "mutation": {
-      "config": "EngineMutation.cfg",
-      "invariant": "DuplicateCannotChangeOrders"
-    }
+    "mutations": [
+      {
+        "config": "EngineMutation.cfg",
+        "invariant": "DuplicateCannotChangeOrders"
+      }
+    ]
   },
   "bridge": {
     "module": "models/Bridge.tla",
@@ -46,10 +50,12 @@
       "src/replication.cpp"
     ],
     "bounds": "Four orders, at most two orders per batch, one abstract intake FIFO.",
-    "mutation": {
-      "config": "BridgeMutation.cfg",
-      "invariant": "OrdersAccountedFor"
-    }
+    "mutations": [
+      {
+        "config": "BridgeMutation.cfg",
+        "invariant": "OrdersAccountedFor"
+      }
+    ]
   },
   "recovery": {
     "module": "models/Recovery.tla",
@@ -65,10 +71,12 @@
       "src/replication.cpp"
     ],
     "bounds": "Three committed operations, one restart, two operation values.",
-    "mutation": {
-      "config": "RecoveryMutation.cfg",
-      "invariant": "OldReportsSuppressed"
-    }
+    "mutations": [
+      {
+        "config": "RecoveryMutation.cfg",
+        "invariant": "OldReportsSuppressed"
+      }
+    ]
   },
   "gateway": {
     "module": "models/Gateway.tla",
@@ -82,10 +90,12 @@
       "src/gateway.*"
     ],
     "bounds": "Two sessions, two slots, two generations per slot and three reports per connection.",
-    "mutation": {
-      "config": "GatewayMutation.cfg",
-      "invariant": "CurrentBufferOwner"
-    }
+    "mutations": [
+      {
+        "config": "GatewayMutation.cfg",
+        "invariant": "CurrentBufferOwner"
+      }
+    ]
   },
   "frames": {
     "module": "models/Frames.tla",
@@ -101,10 +111,16 @@
       "src/gateway.cpp"
     ],
     "bounds": "Three chunks of one or two abstract frame tokens.",
-    "mutation": {
-      "config": "FramesMutation.cfg",
-      "invariant": "FrameAccounting"
-    }
+    "mutations": [
+      {
+        "config": "FramesMutation.cfg",
+        "invariant": "FrameAccounting"
+      },
+      {
+        "config": "FramesKeepOpen.cfg",
+        "invariant": "MalformedCloses"
+      }
+    ]
   },
   "flow": {
     "module": "models/Flow.tla",
@@ -127,10 +143,12 @@
       "src/replicated_exchange.cpp"
     ],
     "bounds": "One producer, a gateway, capacity one per queue, four commands.",
-    "mutation": {
-      "config": "FlowMutation.cfg",
-      "invariant": "DrainPath"
-    }
+    "mutations": [
+      {
+        "config": "FlowMutation.cfg",
+        "invariant": "DrainPath"
+      }
+    ]
   },
   "delivery": {
     "module": "models/Delivery.tla",
@@ -145,11 +163,13 @@
       "src/gateway.cpp",
       "src/replication.cpp"
     ],
-    "bounds": "Three committed reports and two connection generations.",
-    "mutation": {
-      "config": "DeliveryMutation.cfg",
-      "invariant": "SequencesPerConnection"
-    }
+    "bounds": "Three committed reports, two sessions, and two generations of one socket slot.",
+    "mutations": [
+      {
+        "config": "DeliveryMutation.cfg",
+        "invariant": "ReportKeepsOwner"
+      }
+    ]
   },
   "loadgen": {
     "module": "models/Loadgen.tla",
@@ -165,10 +185,12 @@
       "verification/TLA/loadgen_test.py"
     ],
     "bounds": "Two tracked orders and four requests.",
-    "mutation": {
-      "config": "LoadgenMutation.cfg",
-      "invariant": "TrackedOrders"
-    }
+    "mutations": [
+      {
+        "config": "LoadgenMutation.cfg",
+        "invariant": "TrackedOrders"
+      }
+    ]
   },
   "fault-game": {
     "module": "models/FaultGame.tla",
@@ -183,10 +205,12 @@
       "tests/fault_game_test.py"
     ],
     "bounds": "Three abstract replicas and three commit positions.",
-    "mutation": {
-      "config": "FaultGameMutation.cfg",
-      "invariant": "AgreementOnlyAtSameCommit"
-    }
+    "mutations": [
+      {
+        "config": "FaultGameMutation.cfg",
+        "invariant": "AgreementOnlyAtSameCommit"
+      }
+    ]
   },
   "libvsr": {
     "ctest": [
@@ -210,9 +234,11 @@
       "tests/spsc_queue_test.cpp"
     ],
     "bounds": "Two ring slots, five items, one producer and one consumer.",
-    "mutation": {
-      "config": "SpscMemoryMutation.cfg",
-      "invariant": "ReadPublishedItem"
-    }
+    "mutations": [
+      {
+        "config": "SpscMemoryMutation.cfg",
+        "invariant": "ReadPublishedItem"
+      }
+    ]
   }
 }

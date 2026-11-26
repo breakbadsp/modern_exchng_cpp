@@ -9,11 +9,13 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
-OUT = ROOT / ".tools"
+CACHE = ROOT / ".tools"
+OUT = CACHE
 CATALOG = ROOT / "catalog.json"
 TLC_SHA256 = "fdffef247f563ef6edbfd44958d2a82db79e7564e07cb673262d896353fa6713"
 TLC_URL = "https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar"
@@ -35,15 +37,18 @@ def java_command():
 
 
 def tlc(module, config, expected=None, trace=None):
-    jar = OUT / "tla-release/tla2tools.jar"
-    jar.parent.mkdir(exist_ok=True)
+    jar = CACHE / "tla-release/tla2tools.jar"
+    jar.parent.mkdir(parents=True, exist_ok=True)
     if not jar.exists():
-        download = jar.with_suffix(".part")
-        run(["curl", "-fLsS", TLC_URL, "-o", download], check=True)
-        if hashlib.sha256(download.read_bytes()).hexdigest() != TLC_SHA256:
-            download.unlink()
-            raise ValueError("TLA+ 1.8.0 archive checksum mismatch")
-        download.replace(jar)
+        with tempfile.NamedTemporaryFile(dir=jar.parent, delete=False) as temporary:
+            download = Path(temporary.name)
+        try:
+            run(["curl", "-fLsS", TLC_URL, "-o", download], check=True)
+            if hashlib.sha256(download.read_bytes()).hexdigest() != TLC_SHA256:
+                raise ValueError("TLA+ 1.8.0 archive checksum mismatch")
+            download.replace(jar)
+        finally:
+            download.unlink(missing_ok=True)
     name = f"{module.stem}-{config.stem}"
     command = [
         *java_command(), "-XX:+UseParallelGC", "-Xmx2g", "-cp", jar, "tlc2.TLC",
@@ -231,7 +236,18 @@ def print_kaizen_rules(targets):
         print(f"tla-{name}\t{' '.join(paths)}\tverification/TLA/run check {name}")
 
 
+def ctest_command(build, tests):
+    pattern = "^(" + "|".join(re.escape(test) for test in sorted(tests)) + ")$"
+    command = ["ctest", "--test-dir", build, "-R", pattern]
+    inventory = run([*command, "--show-only=json-v1"], capture_output=True, check=True)
+    registered = {entry["name"] for entry in json.loads(inventory.stdout)["tests"]}
+    if missing := tests - registered:
+        raise ValueError("Missing CTest entries: " + ", ".join(sorted(missing)))
+    return [*command, "--output-on-failure", "--no-tests=error"]
+
+
 def main():
+    global OUT
     targets = json.loads(CATALOG.read_text())
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_subparsers(dest="mode", required=True)
@@ -254,7 +270,10 @@ def main():
     if args.mode == "rules":
         print_kaizen_rules(targets)
         return
-    OUT.mkdir(exist_ok=True)
+    runs = CACHE / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    OUT = Path(tempfile.mkdtemp(prefix=f"{args.mode}-", dir=runs))
+    print(f"Evidence: {OUT}", flush=True)
     configured = os.environ.get("MEX_VERIFY_BUILD")
     build = args.build or (Path(configured) if configured else None)
     if args.mode == "replay":
@@ -267,7 +286,8 @@ def main():
             report_replay(bridge_binary(build), args.scenario)
         return
     selected = targets if args.all else [args.target]
-    tests = set()
+    tests = {test for name in selected for test in targets[name]["ctest"]}
+    native = ctest_command(args.build, tests) if args.build and tests else None
     for name in selected:
         entry = targets[name]
         if name == "libvsr":
@@ -277,17 +297,14 @@ def main():
             module = ROOT / entry["module"]
             for config in entry["configs"]:
                 tlc(module, module.with_name(config))
-            if mutation := entry.get("mutation"):
+            for mutation in entry.get("mutations", []):
                 tlc(module, module.with_name(mutation["config"]), mutation["invariant"])
         if name == "matching":
             matching_proof()
         if name == "bridge":
             bridge_proof(module, build)
-        tests.update(entry["ctest"])
-    if args.build and tests:
-        pattern = "^(" + "|".join(re.escape(test) for test in sorted(tests)) + ")$"
-        run(["ctest", "--test-dir", args.build, "-R", pattern, "--output-on-failure",
-             "--no-tests=error"], check=True)
+    if native:
+        run(native, check=True)
 
 
 if __name__ == "__main__":
