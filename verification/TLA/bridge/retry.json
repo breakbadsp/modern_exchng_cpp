@@ -1,0 +1,12 @@
+{
+  "steps": [
+    {"command": ["enqueue", 1], "expect": "enqueue | 0"},
+    {"command": ["enqueue", 2], "expect": "enqueue | 0"},
+    {"command": ["send"], "expect": "send 1 2 | 0"},
+    {"command": ["enqueue", 3], "expect": "enqueue | 0"},
+    {"command": ["timeout"], "expect": "resume | 0"},
+    {"command": ["evicted"], "expect": "resume | 2"},
+    {"command": ["send"], "expect": "send 3 | 2"},
+    {"command": ["reply"], "expect": "resume | 2"}
+  ]
+}

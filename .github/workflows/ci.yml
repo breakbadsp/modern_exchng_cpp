@@ -4,6 +4,8 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "23 22 * * 0"
 
 permissions:
   contents: read
@@ -34,6 +36,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Install build dependencies
         run: |
@@ -63,3 +66,32 @@ jobs:
 
       - name: Test
         run: ctest --preset "${{ matrix.preset }}" --output-on-failure --no-tests=error
+
+      - name: Install TLA+ prerequisites
+        if: matrix.preset == 'ninja'
+        run: apt-get install --yes --no-install-recommends default-jre-headless curl
+
+      - name: Check out KaizenFlow
+        if: matrix.preset == 'ninja'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: breakbadsp/ai-assets
+          ref: 9cc69bd2ce37e86dc497580958c25b0ced7df3e0
+          path: .ci/ai-assets
+          persist-credentials: false
+
+      - name: Verify TLA+ specifications
+        if: matrix.preset == 'ninja'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          MEX_VERIFY_BUILD: build
+          MEX_LIBVSR_SOURCE_DIR: ${{ github.workspace }}/.ci/libvsr
+        run: |
+          diff -u .kaizen-checks <(verification/TLA/run rules)
+          printf '/.ci/\n' >> "$(git rev-parse --git-path info/exclude)"
+          if [[ -n "$BASE" ]] && git cat-file -e "$BASE^{commit}"; then
+            .ci/ai-assets/scripts/kaizen-checks.sh --base "$BASE"
+          else
+            .ci/ai-assets/scripts/kaizen-checks.sh --all
+          fi
+        shell: bash

@@ -1,0 +1,218 @@
+{
+  "matching": {
+    "module": "matching/Matching.tla",
+    "configs": [
+      "Matching.cfg",
+      "Capacity.cfg"
+    ],
+    "ctest": [
+      "test_book"
+    ],
+    "source": [
+      "src/book.cpp",
+      "src/book.hpp",
+      "src/types.hpp"
+    ],
+    "bounds": "Three prices, two quantities, three slots, two levels per side, four commands. Separate five-command case with four slots and two levels."
+  },
+  "engine": {
+    "module": "models/Engine.tla",
+    "configs": [
+      "Engine.cfg"
+    ],
+    "ctest": [
+      "test_engine"
+    ],
+    "source": [
+      "src/engine.cpp",
+      "src/engine.hpp"
+    ],
+    "bounds": "Two sessions, two client order IDs, two request numbers, one symbol.",
+    "mutation": {
+      "config": "EngineMutation.cfg",
+      "invariant": "DuplicateCannotChangeOrders"
+    }
+  },
+  "bridge": {
+    "module": "models/Bridge.tla",
+    "configs": [
+      "Bridge.cfg"
+    ],
+    "ctest": [
+      "test_replication"
+    ],
+    "source": [
+      "src/replication.hpp",
+      "src/replication.cpp"
+    ],
+    "bounds": "Four orders, at most two orders per batch, one abstract intake FIFO.",
+    "mutation": {
+      "config": "BridgeMutation.cfg",
+      "invariant": "OrdersAccountedFor"
+    }
+  },
+  "recovery": {
+    "module": "models/Recovery.tla",
+    "configs": [
+      "Recovery.cfg"
+    ],
+    "ctest": [
+      "test_replication",
+      "replicated_smoke"
+    ],
+    "source": [
+      "src/engine.cpp",
+      "src/replication.cpp"
+    ],
+    "bounds": "Three committed operations, one restart, two operation values.",
+    "mutation": {
+      "config": "RecoveryMutation.cfg",
+      "invariant": "OldReportsSuppressed"
+    }
+  },
+  "gateway": {
+    "module": "models/Gateway.tla",
+    "configs": [
+      "Gateway.cfg"
+    ],
+    "ctest": [
+      "test_gateway"
+    ],
+    "source": [
+      "src/gateway.*"
+    ],
+    "bounds": "Two sessions, two slots, two generations per slot and three reports per connection.",
+    "mutation": {
+      "config": "GatewayMutation.cfg",
+      "invariant": "CurrentBufferOwner"
+    }
+  },
+  "frames": {
+    "module": "models/Frames.tla",
+    "configs": [
+      "Frames.cfg"
+    ],
+    "ctest": [
+      "test_protocol",
+      "test_gateway"
+    ],
+    "source": [
+      "src/protocol.hpp",
+      "src/gateway.cpp"
+    ],
+    "bounds": "Three chunks of one or two abstract frame tokens.",
+    "mutation": {
+      "config": "FramesMutation.cfg",
+      "invariant": "FrameAccounting"
+    }
+  },
+  "flow": {
+    "module": "models/Flow.tla",
+    "configs": [
+      "Flow.cfg"
+    ],
+    "ctest": [
+      "test_spsc_queue",
+      "test_engine",
+      "test_gateway",
+      "exchange_smoke",
+      "exchange_smoke_uring",
+      "replicated_smoke"
+    ],
+    "source": [
+      "src/spsc_queue.hpp",
+      "src/engine.cpp",
+      "src/gateway.*",
+      "src/main.cpp",
+      "src/replicated_exchange.cpp"
+    ],
+    "bounds": "One producer, a gateway, capacity one per queue, four commands.",
+    "mutation": {
+      "config": "FlowMutation.cfg",
+      "invariant": "DrainPath"
+    }
+  },
+  "delivery": {
+    "module": "models/Delivery.tla",
+    "configs": [
+      "Delivery.cfg"
+    ],
+    "ctest": [
+      "test_gateway",
+      "test_replication"
+    ],
+    "source": [
+      "src/gateway.cpp",
+      "src/replication.cpp"
+    ],
+    "bounds": "Three committed reports and two connection generations.",
+    "mutation": {
+      "config": "DeliveryMutation.cfg",
+      "invariant": "SequencesPerConnection"
+    }
+  },
+  "loadgen": {
+    "module": "models/Loadgen.tla",
+    "configs": [
+      "Loadgen.cfg"
+    ],
+    "ctest": [
+      "tool_limits",
+      "tla_loadgen_protocol"
+    ],
+    "source": [
+      "tools/loadgen.cpp",
+      "verification/TLA/loadgen_test.py"
+    ],
+    "bounds": "Two tracked orders and four requests.",
+    "mutation": {
+      "config": "LoadgenMutation.cfg",
+      "invariant": "TrackedOrders"
+    }
+  },
+  "fault-game": {
+    "module": "models/FaultGame.tla",
+    "configs": [
+      "FaultGame.cfg"
+    ],
+    "ctest": [
+      "tla_fault_game"
+    ],
+    "source": [
+      "tools/fault_game/*",
+      "tests/fault_game_test.py"
+    ],
+    "bounds": "Three abstract replicas and three commit positions.",
+    "mutation": {
+      "config": "FaultGameMutation.cfg",
+      "invariant": "AgreementOnlyAtSameCommit"
+    }
+  },
+  "libvsr": {
+    "ctest": [
+      "replicated_smoke"
+    ],
+    "source": [
+      "src/replicated_exchange.cpp"
+    ],
+    "bounds": "Use the pinned libvsr spec and its existing configuration bounds."
+  },
+  "spsc-memory": {
+    "module": "models/SpscMemory.tla",
+    "configs": [
+      "SpscMemory.cfg"
+    ],
+    "ctest": [
+      "test_spsc_queue"
+    ],
+    "source": [
+      "src/spsc_queue.hpp",
+      "tests/spsc_queue_test.cpp"
+    ],
+    "bounds": "Two ring slots, five items, one producer and one consumer.",
+    "mutation": {
+      "config": "SpscMemoryMutation.cfg",
+      "invariant": "ReadPublishedItem"
+    }
+  }
+}
