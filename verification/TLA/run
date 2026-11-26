@@ -287,7 +287,7 @@ def main():
         return
     selected = targets if args.all else [args.target]
     tests = {test for name in selected for test in targets[name]["ctest"]}
-    native = ctest_command(args.build, tests) if args.build and tests else None
+    native = ctest_command(build, tests) if build and tests else None
     for name in selected:
         entry = targets[name]
         if name == "libvsr":
@@ -303,7 +303,7 @@ def main():
             matching_proof()
         if name == "bridge":
             bridge_proof(module, build)
-    if native:
+    if args.build and native:
         run(native, check=True)
 
 

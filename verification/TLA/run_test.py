@@ -1,6 +1,7 @@
 """Check evidence isolation and fail when a named implementation test is absent."""
 
 from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -35,12 +36,18 @@ class RunnerTest(unittest.TestCase):
             Path(directory, "CTestTestfile.cmake").write_text(
                 'add_test(test_replication "/bin/true")\n'
             )
-            result = subprocess.run(
-                [RUN, "check", "recovery", "--build", directory],
-                capture_output=True, text=True, timeout=10,
-            )
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("Missing CTest entries: replicated_smoke", result.stderr)
+            command = [RUN, "check", "recovery"]
+            for arguments, environment in (
+                (["--build", directory], os.environ),
+                ([], {**os.environ, "MEX_VERIFY_BUILD": directory}),
+            ):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run(
+                        [*command, *arguments], env=environment, capture_output=True,
+                        text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("Missing CTest entries: replicated_smoke", result.stderr)
 
 
 if __name__ == "__main__":
