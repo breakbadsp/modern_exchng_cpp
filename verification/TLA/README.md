@@ -25,7 +25,9 @@ Set JAVA, TLC_WORKERS, or CXX to change the executable or worker count.
 The libvsr path must be a Git checkout with the commit pinned in
 CMakeLists.txt. The runner reads the model at that commit.
 
-Logs, model-generated scenarios, and scratch executables stay in .tools/.
+The runner prints a separate evidence directory for each invocation.
+Logs, model-generated scenarios, and scratch executables stay under .tools/runs/.
+An implementation check fails if the build lacks any mapped CTest entry.
 Witness checks intentionally reach a named invariant violation. A mutation
 passes only if TLC reports the named violation. Compilation, parsing, and
 tool failures fail the check.
@@ -39,10 +41,10 @@ tool failures fail the check.
 | Bridge | One intake FIFO, one pending batch, timeout, reply, and eviction. | Direct BasicReplicationBridge::Step() replay of a hand-written case and a TLC eviction witness. Existing replication tests cover multiple intake queues, batch overflow, and real replicas. |
 | Recovery | Committed prefix, snapshot, one restart, an abstract state value, and the report cutoff. | Existing replication and engine tests check real snapshots, replay, and clock skew. |
 | Gateway | Logon attaches a session, queues the logon acknowledgement, and starts report sequence numbering. Slots track generation and kernel buffer ownership. | Existing socket tests exercise both backends. The model explores explicit completion orders. |
-| Frames | Abstract header and body tokens. A valid frame is consumed once. Malformed input closes the connection. | Existing codec and socket tests exercise real byte buffers. |
+| Frames | Abstract header and body tokens. A valid frame is consumed once. Malformed input closes the connection when processing runs. | Existing codec and socket tests exercise real byte buffers. |
 | Flow | One command producer, one report reader, two bounded queues, and stop and join. | Existing SPSC stress tests, engine stall tests, and standalone and replicated smoke tests. TLC assumes enabled publish, drain, join, and stop actions eventually run. |
 | SpscMemory | Separate write, release, acquire, read, and slot reuse steps. An acquire makes writes before its observed release visible. | Existing two-thread SPSC tests. The model also catches a tail refresh that exposes the tail without publishing its payload. |
-| Delivery | Committed reports can be staged on the current connection or dropped. Logon acknowledgement uses sequence one. | Existing gateway tests check sequence numbers, disconnect, and reconnect. Staged output can still be lost after socket close. |
+| Delivery | Two sessions share one socket slot over time. A report can be staged for its owner or dropped. Logon acknowledgement uses sequence one. | Gateway tests check sequence numbers, reconnect, and a report for a prior occupant after slot reuse. Staged output can still be lost after socket close. |
 | Loadgen | The generator's tracked-order FIFO and request sequence. | A loopback peer checks 8,192 real requests, including symbol, order ID, sequence, and cancel order. |
 | FaultGame | Three abstract replicas, verification ownership, and a result based on sampled commit positions. | The existing fault game test drives seven real replica processes, faults, recovery, and agreement checks. |
 | libvsr | Upstream quorum, durable commit, view change, and journal recovery. | Run the pinned model, its mutation configurations, and MEX's replicated smoke test. |

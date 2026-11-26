@@ -1,55 +1,61 @@
 ------------------------------- MODULE Delivery -------------------------------
 EXTENDS Naturals, Sequences, FiniteSets
 
-CONSTANTS MaxReports, MaxConnections, Mutate
-VARIABLES connected, connection, issued, seq, queued, staged, dropped
+CONSTANTS MaxReports, MaxConnections, Sessions, Mutate
+VARIABLES session, connection, issued, seq, queued, staged, dropped, previousSession
 
-State == <<connected, connection, issued, seq, queued, staged, dropped>>
+State == <<session, connection, issued, seq, queued, staged, dropped, previousSession>>
 Init ==
-    /\ connected = FALSE /\ connection = 0 /\ issued = 0 /\ seq = 2
-    /\ queued = <<>> /\ staged = <<>> /\ dropped = {}
+    /\ session = 0 /\ connection = 0 /\ issued = 0 /\ seq = 2
+    /\ queued = <<>> /\ staged = <<>> /\ dropped = {} /\ previousSession = 0
 
-Commit ==
+Commit(owner) ==
     /\ issued < MaxReports
     /\ issued' = issued + 1
-    /\ queued' = Append(queued, issued')
-    /\ UNCHANGED <<connected, connection, seq, staged, dropped>>
+    /\ queued' = Append(queued, [id |-> issued', owner |-> owner])
+    /\ UNCHANGED <<session, connection, seq, staged, dropped, previousSession>>
 
-Connect ==
-    /\ ~connected /\ connection < MaxConnections
-    /\ connected' = TRUE /\ connection' = connection + 1 /\ seq' = IF Mutate THEN seq ELSE 2
-    /\ UNCHANGED <<issued, queued, staged, dropped>>
+Connect(owner) ==
+    /\ session = 0 /\ connection < MaxConnections
+    /\ session' = owner /\ connection' = connection + 1 /\ seq' = 2
+    /\ UNCHANGED <<issued, queued, staged, dropped, previousSession>>
 
 Disconnect ==
-    /\ connected /\ connected' = FALSE
+    /\ session # 0 /\ session' = 0 /\ previousSession' = session
     /\ UNCHANGED <<connection, issued, seq, queued, staged, dropped>>
 
 Route ==
     /\ Len(queued) > 0
     /\ queued' = Tail(queued)
-    /\ IF connected THEN
-          /\ staged' = Append(staged, [id |-> Head(queued), epoch |-> connection, seq |-> seq])
+    /\ LET report == Head(queued)
+       IN IF session = report.owner \/ (Mutate /\ session # 0 /\ previousSession = report.owner) THEN
+          /\ staged' = Append(staged, [id |-> report.id, owner |-> report.owner,
+                                       recipient |-> session, epoch |-> connection, seq |-> seq])
           /\ seq' = seq + 1
           /\ UNCHANGED dropped
        ELSE
-          /\ dropped' = dropped \cup {Head(queued)}
+          /\ dropped' = dropped \cup {report.id}
           /\ UNCHANGED <<seq, staged>>
-    /\ UNCHANGED <<connected, connection, issued>>
+    /\ UNCHANGED <<session, connection, issued, previousSession>>
 
 Overflow ==
-    /\ connected /\ Len(queued) > 0
-    /\ connected' = FALSE
+    /\ Len(queued) > 0 /\ session = Head(queued).owner
+    /\ session' = 0 /\ previousSession' = session
     /\ queued' = Tail(queued)
-    /\ dropped' = dropped \cup {Head(queued)}
+    /\ dropped' = dropped \cup {Head(queued).id}
     /\ UNCHANGED <<connection, issued, seq, staged>>
 
-Next == Overflow \/ Commit \/ Connect \/ Disconnect \/ Route \/ UNCHANGED State
+Next == Overflow \/ Disconnect \/ Route \/ UNCHANGED State
+        \/ (\E user \in Sessions : Commit(user) \/ Connect(user))
 
 ReportAccounting ==
     LET sent == {staged[i].id : i \in 1..Len(staged)}
-        pending == {queued[i] : i \in 1..Len(queued)}
+        pending == {queued[i].id : i \in 1..Len(queued)}
     IN /\ sent \cup pending \cup dropped = 1..issued
        /\ Len(staged) + Len(queued) + Cardinality(dropped) = issued
+
+ReportKeepsOwner ==
+    \A i \in 1..Len(staged) : staged[i].owner = staged[i].recipient
 
 SequencesPerConnection ==
     \A i \in 1..Len(staged) :

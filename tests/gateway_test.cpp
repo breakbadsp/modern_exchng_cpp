@@ -848,9 +848,10 @@ TEST_P(GatewayTest, SlowReaderThatKeepsUpIsNotDisconnected)
   EXPECT_EQ(exchange.Gate().DroppedReports(), 0U);
 }
 
+// Reports stay with their session after another client reuses its socket slot.
 TEST_P(GatewayTest, ReportForASessionWithoutConnectionIsDropped)
 {
-  const Exchange exchange{GetParam(), {.run_engines_ = false}};
+  const Exchange exchange{GetParam(), {.max_connections_ = 1, .run_engines_ = false}};
 
   Push(exchange.Outbound(0), RejectFor(kBob, 1)); // bob never logged on
   EXPECT_TRUE(WaitFor([&] { return exchange.Gate().DroppedReports() == 1; }));
@@ -862,15 +863,42 @@ TEST_P(GatewayTest, ReportForASessionWithoutConnectionIsDropped)
     alice.SendBytes(std::array{std::byte{3}, std::byte{0}, std::byte{99}});
     ASSERT_TRUE(alice.IsClosedByPeer()); // the gateway has freed the session
   }
-  Push(exchange.Outbound(0), RejectFor(kAlice, 2));
-  EXPECT_TRUE(WaitFor([&] { return exchange.Gate().DroppedReports() == 2; }));
+  // A closed slot can still have an I/O completion pending.
+  const auto connect = [&exchange](const wire::Logon &p_logon)
+  {
+    std::optional<Client> client{};
+    if (!WaitFor(
+            [&]
+            {
+              client.emplace(exchange.Port());
+              client->Send(p_logon);
+              const std::optional<Frame> frame = client->Read();
+              return frame.has_value() && std::holds_alternative<wire::LogonAck>(frame->message_) &&
+                     frame->seq_ == 1;
+            }))
+    {
+      client.reset();
+    }
+    return client;
+  };
+
+  // Only one slot exists. Bob must reuse Alice's slot without receiving her report.
+  {
+    const std::optional<Client> bob = connect(BobLogon());
+    ASSERT_TRUE(bob.has_value());
+    Push(exchange.Outbound(0), RejectFor(kAlice, 2));
+    EXPECT_TRUE(WaitFor([&] { return exchange.Gate().DroppedReports() == 2; }));
+    Push(exchange.Outbound(0), RejectFor(kBob, 4));
+    EXPECT_EQ(Next<wire::Reject>(*bob, 2).client_order_id_, 4U);
+    bob->SendBytes(std::array{std::byte{3}, std::byte{0}, std::byte{99}});
+    ASSERT_TRUE(bob->IsClosedByPeer());
+  }
 
   // A new logon starts at seq 1 and does not get the dropped report.
-  const Client alice{exchange.Port()};
-  alice.Send(AliceLogon());
-  static_cast<void>(Next<wire::LogonAck>(alice, 1));
+  const std::optional<Client> alice = connect(AliceLogon());
+  ASSERT_TRUE(alice.has_value());
   Push(exchange.Outbound(0), RejectFor(kAlice, 3));
-  EXPECT_EQ(Next<wire::Reject>(alice, 2).client_order_id_, 3U);
+  EXPECT_EQ(Next<wire::Reject>(*alice, 2).client_order_id_, 3U);
 }
 
 TEST_P(GatewayTest, SessionKeepsItsRestingOrderAcrossReconnect)
