@@ -85,8 +85,12 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           MEX_VERIFY_BUILD: build
-          MEX_LIBVSR_SOURCE_DIR: ${{ github.workspace }}/.ci/libvsr
         run: |
+          workspace="$(pwd -P)"
+          export MEX_LIBVSR_SOURCE_DIR="$workspace/.ci/libvsr"
+          export GIT_CONFIG_COUNT=2
+          export GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$workspace"
+          export GIT_CONFIG_KEY_1=safe.directory GIT_CONFIG_VALUE_1="$MEX_LIBVSR_SOURCE_DIR"
           diff -u .kaizen-checks <(verification/TLA/run rules)
           printf '/.ci/\n' >> "$(git rev-parse --git-path info/exclude)"
           if [[ -n "$BASE" ]] && git cat-file -e "$BASE^{commit}"; then
