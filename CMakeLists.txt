@@ -153,6 +153,14 @@ target_include_directories(bench_client PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(bench_client PRIVATE -O3 -g -DNDEBUG -fno-omit-frame-pointer
     -fcontract-evaluation-semantic=ignore)
 
+# The engine thread alone, with the load generator's order mix. Built like
+# mex_exchange (-O3, contracts on), with -g and frame pointers for perf.
+add_executable(bench_engine tests/engine_bench.cpp src/book.cpp src/config.cpp src/engine.cpp
+    src/gateway.cpp src/market_data.cpp)
+target_include_directories(bench_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(bench_engine PRIVATE Threads::Threads PkgConfig::LIBURING)
+target_compile_options(bench_engine PRIVATE -O3 -g -DNDEBUG -fno-omit-frame-pointer)
+
 # The exchange and the load generator are measured end to end, so they build at
 # -O3 like bench_book. The exchange compiles the sources itself, because mex is
 # built with the preset's flags. Contracts stay on in the exchange.
@@ -193,6 +201,7 @@ add_test(NAME replicated_smoke
 set_tests_properties(replicated_smoke PROPERTIES TIMEOUT 180)
 # The flow checks its fill totals and final book state; contracts are off here.
 add_test(NAME bench_client_smoke COMMAND bench_client batch 1000 64)
+add_test(NAME bench_engine_smoke COMMAND bench_engine 1000)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME market_data_live COMMAND ${Python3_EXECUTABLE}
