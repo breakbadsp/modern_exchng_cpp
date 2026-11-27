@@ -188,6 +188,11 @@ std::size_t ExchangeStateMachine::Execute(const vsr::Operation &p_operation,
         },
         decoded.message_);
   }
+  // One view for each book per committed operation, not one for each command in it.
+  for (const std::unique_ptr<EngineSlot> &slot : engines_)
+  {
+    slot->engine_.PublishMarketData();
+  }
   std::size_t reply_bytes = 0;
   PutField(p_reply, reply_bytes, applied_count);
   return reply_bytes;

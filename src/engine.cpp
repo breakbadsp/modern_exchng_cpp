@@ -356,6 +356,7 @@ struct Engine::Instrument
   ClientOrderIndex index_;
   wire::SymbolId symbol_id_;
   MarketBook *market_book_ = nullptr;
+  bool market_stale_ = false; // in Engine::stale_markets_
   std::unique_ptr<Book::RestingOrder[]> restore_orders_;
   std::unique_ptr<OrderId[]> restore_free_;
 };
@@ -369,6 +370,7 @@ Engine::Engine(std::span<const BookConfig> p_books, std::size_t p_session_count,
   {
     instruments_.push_back(std::make_unique<Instrument>(config));
   }
+  stale_markets_.reserve(instruments_.size());
 }
 
 Engine::~Engine() = default;
@@ -378,9 +380,16 @@ bool Engine::ProcessOne()
   const std::optional<Command> command = inbound_.TryPop();
   if (!command.has_value())
   {
+    // No later command is waiting to replace the view, so publish it now.
+    PublishMarketData();
     return false;
   }
   Apply(*command);
+  // Under steady load the queue may never be empty. This limits the age of a view.
+  if (++commands_since_publish_ == kMarketDataBatch)
+  {
+    PublishMarketData();
+  }
   return true;
 }
 
@@ -402,9 +411,10 @@ void Engine::Apply(const Command &p_command)
         }
         last_request = p_order.request_number_;
         Execute(p_command.session_id_, inst, p_order);
-        if (inst.market_book_ != nullptr)
+        if (inst.market_book_ != nullptr && !inst.market_stale_)
         {
-          inst.market_book_->Publish(inst.book_);
+          inst.market_stale_ = true;
+          stale_markets_.push_back(&inst);
         }
       },
       p_command.order_);
@@ -514,6 +524,17 @@ void Engine::SetMarketData(MarketDataPublisher &p_publisher)
     inst->market_book_ = &p_publisher.ForSymbol(inst->symbol_id_);
   }
   RefreshMarketData();
+}
+
+void Engine::PublishMarketData()
+{
+  for (Instrument *const inst : stale_markets_)
+  {
+    inst->market_book_->Publish(inst->book_);
+    inst->market_stale_ = false;
+  }
+  stale_markets_.clear();
+  commands_since_publish_ = 0;
 }
 
 void Engine::RefreshMarketData()

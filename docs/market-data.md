@@ -43,8 +43,10 @@ Intermediate views can be overwritten during a burst. The feed is suitable for
 depth displays and current-book clients.
 
 A separate thread calculates and encodes changes. The matching thread copies
-up to 40 levels per command into fixed storage, with no socket calls, locks, or
-heap allocation. Up to 32 TCP subscribers share one publisher. The publisher
+up to 40 levels of each changed book into fixed storage, with no socket calls,
+locks, or heap allocation. It copies when its inbound queue is empty, or after
+64 commands while the queue stays busy (`kMarketDataBatch`). A copy for each
+command doubled the engine cost; see [performance](performance.md#engine-thread). Up to 32 TCP subscribers share one publisher. The publisher
 closes a connection if its pending output exceeds the byte limit or 256 batches, or
 if a write makes no progress for five seconds while output is pending. The byte
 limit starts at 1 MiB and grows with the configured symbol count to fit a full

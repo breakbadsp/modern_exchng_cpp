@@ -1,5 +1,7 @@
 #include "book.hpp"
+#include "config.hpp"
 #include "engine.hpp"
+#include "market_data.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -266,6 +268,14 @@ TEST(AllocCount, EngineCommandsDoNotCallOperatorNew)
   constexpr std::size_t kSessionCount = 2;
   mex::Engine engine{std::span<const mex::BookConfig>{&config, 1}, kSessionCount, inbound,
                      outbound};
+  // With the market feed bound, as mex_exchange runs with --market-data-port.
+  mex::Config feed_config{};
+  feed_config.symbols_.push_back(
+      {.symbol_id_ = 1, .min_price_ = mex::Price{1}, .max_price_ = mex::Price{1'000'000}});
+  feed_config.gateway_.listen_address_ = "127.0.0.1";
+  auto publisher = mex::MarketDataPublisher::Create(feed_config, 0);
+  ASSERT_TRUE(publisher.has_value()) << publisher.error();
+  engine.SetMarketData(*publisher);
 
   std::uint64_t state = 0x1234cafef00dULL;
 
