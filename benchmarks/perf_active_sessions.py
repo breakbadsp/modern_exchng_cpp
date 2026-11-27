@@ -130,7 +130,7 @@ def clients(library, port, count, seconds, base, extra, hot_symbol):
             "min_orders_per_session": min(r["min_orders_per_session"] for r in results)}
 
 
-def case(build, library, count, seconds, base, extra, hot_symbol=False, io="epoll"):
+def case(build, library, count, seconds, base, extra, hot_symbol=False):
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
@@ -138,7 +138,7 @@ def case(build, library, count, seconds, base, extra, hot_symbol=False, io="epol
         config = Path(work) / "exchange.cfg"
         config.write_text(configure(count + ACTIVE, port), encoding="ascii")
         with subprocess.Popen(
-            ["taskset", "-c", "3-5", str(build / "mex_exchange"), str(config), "--io", io],
+            ["taskset", "-c", "3-5", str(build / "mex_exchange"), str(config)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         ) as exchange:
             try:

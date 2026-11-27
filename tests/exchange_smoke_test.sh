@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 # End-to-end smoke test: starts mex_exchange on a free port, runs mex_loadgen
 # against it, then stops the exchange with SIGINT. Both must exit 0.
-# Usage: exchange_smoke_test.sh <mex_exchange> <mex_loadgen> <example config> <work dir> [epoll|uring]
+# Usage: exchange_smoke_test.sh <mex_exchange> <mex_loadgen> <example config> <work dir>
 set -euo pipefail
 
 exchange=$1
 loadgen=$2
 example_config=$3
 work_dir=$4
-io=${5:-epoll}
 mkdir -p "$work_dir"
 config="$work_dir/exchange.cfg"
 log="$work_dir/exchange.log"
+
+# An unknown option must show the usage, not pass as <replica number> <data path>.
+option_status=0
+option_output=$("$exchange" "$example_config" --io uring 2>&1) || option_status=$?
+if [[ $option_status -ne 2 || "$option_output" != usage:* ]]; then
+  printf 'FAIL: unknown option: exit %s\n%s\n' "$option_status" "$option_output"
+  exit 1
+fi
 
 pid=""
 cleanup()
@@ -26,7 +33,7 @@ trap cleanup EXIT
 for _ in 1 2 3 4 5; do
   port=$((20000 + RANDOM % 40000))
   sed "s/^gateway port .*/gateway port $port/" "$example_config" >"$config"
-  "$exchange" "$config" --io "$io" >"$log" 2>&1 &
+  "$exchange" "$config" >"$log" 2>&1 &
   pid=$!
   for _ in $(seq 100); do
     if grep -q "listening" "$log" || ! kill -0 "$pid" 2>/dev/null; then

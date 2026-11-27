@@ -132,7 +132,6 @@
       "test_engine",
       "test_gateway",
       "exchange_smoke",
-      "exchange_smoke_uring",
       "replicated_smoke"
     ],
     "source": [

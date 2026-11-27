@@ -157,7 +157,7 @@ async def trade(build, port, sockets, reconnect_count=0):
     return result
 
 
-async def case(build, count, reconnect_count, io="epoll"):
+async def case(build, count, reconnect_count):
     # Reserve only until the process can bind the same local listen address.
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
@@ -169,7 +169,7 @@ async def case(build, count, reconnect_count, io="epoll"):
             config = Path(work) / "exchange.cfg"
             config.write_text(configure(count, port), encoding="ascii")
             async with AsyncExitStack() as stack:
-                exchange = await start(stack, "3-5", build / "mex_exchange", str(config), "--io", io)
+                exchange = await start(stack, "3-5", build / "mex_exchange", str(config))
                 async with asyncio.timeout(90):
                     while True:
                         line = await exchange.stdout.readline()

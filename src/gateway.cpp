@@ -20,7 +20,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <system_error>
@@ -33,9 +32,6 @@ namespace mex
 {
 namespace
 {
-
-// epoll user data of the listening socket; connections use their index.
-constexpr std::uint64_t kListenerTag = ~std::uint64_t{0};
 
 constexpr std::uint64_t kFirstSeq = 1;
 
@@ -249,41 +245,24 @@ std::expected<TcpListener, std::string> OpenTcpListener(const std::string &p_add
   return listener;
 }
 
-std::expected<GatewaySockets, std::string> OpenGatewaySockets(const GatewayConfig &p_config,
-                                                              GatewayIo p_io)
+std::expected<GatewaySockets, std::string> OpenGatewaySockets(const GatewayConfig &p_config)
 {
   auto listener = OpenTcpListener(p_config.listen_address_, p_config.port_);
   if (!listener.has_value())
   {
     return std::unexpected(std::move(listener.error()));
   }
-  GatewaySockets sockets{
-      .listener_ = std::move(listener->fd_), .port_ = listener->port_, .io_ = p_io};
-  if (p_io == GatewayIo::Uring)
+  const std::uint64_t wanted =
+      std::min(kSqesPerConnection * p_config.max_connections_ + kSpareSqes, kMaxSqEntries);
+  const auto sq_entries = static_cast<std::uint32_t>(std::bit_ceil(wanted));
+  auto ring = UniqueRing::Create(sq_entries, kCqPerSq * sq_entries, kRingFlags);
+  if (!ring.has_value())
   {
-    const std::uint64_t wanted =
-        std::min(kSqesPerConnection * p_config.max_connections_ + kSpareSqes, kMaxSqEntries);
-    const auto sq_entries = static_cast<std::uint32_t>(std::bit_ceil(wanted));
-    auto ring = UniqueRing::Create(sq_entries, kCqPerSq * sq_entries, kRingFlags);
-    if (!ring.has_value())
-    {
-      return std::unexpected(
-          std::format("io_uring_queue_init: {}", std::system_category().message(ring.error())));
-    }
-    sockets.ring_ = std::move(*ring);
-    return sockets;
+    return std::unexpected(
+        std::format("io_uring_queue_init: {}", std::system_category().message(ring.error())));
   }
-  sockets.epoll_ = UniqueFd{::epoll_create1(EPOLL_CLOEXEC)};
-  if (!sockets.epoll_.IsOpen())
-  {
-    return SystemError("epoll_create1");
-  }
-  epoll_event event{.events = EPOLLIN, .data = {.u64 = kListenerTag}};
-  if (::epoll_ctl(sockets.epoll_.Get(), EPOLL_CTL_ADD, sockets.listener_.Get(), &event) != 0)
-  {
-    return SystemError("epoll_ctl listener");
-  }
-  return sockets;
+  return GatewaySockets{
+      .listener_ = std::move(listener->fd_), .ring_ = std::move(*ring), .port_ = listener->port_};
 }
 
 struct Gateway::Connection
@@ -293,9 +272,8 @@ struct Gateway::Connection
   std::size_t read_size_ = 0;
   std::size_t send_begin_ = 0; // unsent bytes are [send_begin_, send_end_)
   std::size_t send_end_ = 0;
-  bool want_write_ = false;    // EPOLLOUT is registered
   bool pending_flush_ = false; // the index is in Gateway::pending_flush_
-  // io_uring only. While recv_in_flight_ the kernel writes the free tail of
+  // While recv_in_flight_ the kernel writes the free tail of
   // read_; while send_in_flight_ it reads send_ from send_begin_ on.
   std::uint32_t generation_ = 0; // in the user data of this slot's operations
   bool recv_in_flight_ = false;
@@ -323,28 +301,19 @@ Gateway::Gateway(const Config &p_config, GatewaySockets p_sockets,
     free_connections_.push_back(index - 1);
   }
   pending_flush_.reserve(max_connections);
-  if (sockets_.io_ == GatewayIo::Uring)
-  {
-    uring_cq_entries_ = sockets_.ring_.Get()->cq.ring_entries;
-  }
+  uring_cq_entries_ = sockets_.ring_.Get()->cq.ring_entries;
 }
 
 Gateway::~Gateway() = default;
 
 void Gateway::Run()
 {
-  if (sockets_.io_ == GatewayIo::Uring)
-  {
-    StartUring();
-  }
+  StartUring();
   while (!stop_.load(std::memory_order_relaxed))
   {
     PollOnce();
   }
-  if (sockets_.io_ == GatewayIo::Uring)
-  {
-    StopUring();
-  }
+  StopUring();
 }
 
 void Gateway::Stop() { stop_.store(true, std::memory_order_relaxed); }
@@ -356,54 +325,9 @@ std::uint64_t Gateway::DroppedReports() const
 
 void Gateway::PollOnce()
 {
-  switch (sockets_.io_)
-  {
-  case GatewayIo::Epoll:
-    PollEpoll();
-    break;
-  case GatewayIo::Uring:
-    PollUring();
-    break;
-  }
+  PollUring();
   DrainOutbound();
   FlushPending();
-}
-
-void Gateway::PollEpoll()
-{
-  // Timeout 0: busy-poll, so the outbound queues are drained while sockets are idle.
-  const int count = ::epoll_wait(sockets_.epoll_.Get(), events_.data(), kMaxEvents, 0);
-  for (int i = 0; i < count; ++i)
-  {
-    const epoll_event &event = events_[static_cast<std::size_t>(i)];
-    if (event.data.u64 == kListenerTag)
-    {
-      Accept();
-      continue;
-    }
-    // A connection is closed only while its own event is handled, and an fd
-    // appears once per batch, so no later event in this batch names a reused slot.
-    const auto index = static_cast<std::uint32_t>(event.data.u64);
-    if ((event.events & (EPOLLIN | EPOLLHUP | EPOLLERR)) != 0)
-    {
-      OnReadable(index);
-    }
-    if ((event.events & EPOLLOUT) != 0 && connections_[index].fd_.IsOpen())
-    {
-      static_cast<void>(FlushEpoll(index));
-    }
-  }
-}
-
-void Gateway::Accept()
-{
-  // A connection beyond max_connections, or one that cannot be set up, is
-  // closed when fd goes out of scope.
-  UniqueFd fd{::accept4(sockets_.listener_.Get(), nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC)};
-  if (fd.IsOpen())
-  {
-    Adopt(std::move(fd));
-  }
 }
 
 void Gateway::Adopt(UniqueFd p_fd)
@@ -419,41 +343,10 @@ void Gateway::Adopt(UniqueFd p_fd)
   }
   const std::uint32_t index = free_connections_.back();
   Connection &connection = connections_[index];
-  if (sockets_.io_ == GatewayIo::Epoll)
-  {
-    epoll_event event{.events = EPOLLIN, .data = {.u64 = index}};
-    if (::epoll_ctl(sockets_.epoll_.Get(), EPOLL_CTL_ADD, p_fd.Get(), &event) != 0)
-    {
-      return;
-    }
-  }
   free_connections_.pop_back();
   connection.fd_ = std::move(p_fd);
-  if (sockets_.io_ == GatewayIo::Uring)
-  {
-    connection.generation_ = (connection.generation_ + 1) & kGenerationMask;
-    ArmRecv(index);
-  }
-}
-
-void Gateway::OnReadable(std::uint32_t p_index)
-{
-  Connection &connection = connections_[p_index];
-  // Compaction leaves less than one frame, and the buffer holds several.
-  contract_assert(connection.read_size_ < kReadBufferSize);
-  const std::span<std::byte> space = std::span{connection.read_}.subspan(connection.read_size_);
-  const ssize_t received = ::recv(connection.fd_.Get(), space.data(), space.size(), 0);
-  if (received < 0 && (WouldBlock(errno) || errno == EINTR))
-  {
-    return;
-  }
-  if (received <= 0)
-  {
-    Close(p_index);
-    return;
-  }
-  connection.read_size_ += static_cast<std::size_t>(received);
-  ProcessFrames(p_index);
+  connection.generation_ = (connection.generation_ + 1) & kGenerationMask;
+  ArmRecv(index);
 }
 
 void Gateway::ProcessFrames(std::uint32_t p_index)
@@ -538,7 +431,7 @@ void Gateway::OnLogon(std::uint32_t p_index, const wire::Logon &p_logon)
   {
     if (Append(p_index, kFirstSeq, wire::LogonReject{.reason_ = *reason}))
     {
-      static_cast<void>(Flush(p_index));
+      SubmitSend(p_index);
     }
     Close(p_index);
     return;
@@ -651,12 +544,9 @@ void Gateway::MarkPendingFlush(std::uint32_t p_index)
 bool Gateway::MakeRoom(std::uint32_t p_index)
 {
   Connection &connection = connections_[p_index];
-  // io_uring: a send in flight means the socket buffer was full when the kernel
-  // tried it, and its bytes must stay where they are.
-  const bool open = sockets_.io_ == GatewayIo::Epoll
-                        ? FlushEpoll(p_index)
-                        : (connection.send_in_flight_ || Write(p_index));
-  if (!open)
+  // A send in flight means the socket buffer was full when the kernel tried
+  // it, and its bytes must stay where they are.
+  if (!connection.send_in_flight_ && !Write(p_index))
   {
     return false;
   }
@@ -674,29 +564,6 @@ void Gateway::Compact(std::uint32_t p_index)
                connection.send_end_ - connection.send_begin_);
   connection.send_end_ -= connection.send_begin_;
   connection.send_begin_ = 0;
-}
-
-bool Gateway::Flush(std::uint32_t p_index)
-{
-  switch (sockets_.io_)
-  {
-  case GatewayIo::Epoll:
-    return FlushEpoll(p_index);
-  case GatewayIo::Uring:
-    SubmitSend(p_index);
-    return true;
-  }
-  return true;
-}
-
-bool Gateway::FlushEpoll(std::uint32_t p_index)
-{
-  if (!Write(p_index))
-  {
-    return false;
-  }
-  const Connection &connection = connections_[p_index];
-  return SetWriteInterest(p_index, connection.send_begin_ < connection.send_end_);
 }
 
 bool Gateway::Write(std::uint32_t p_index)
@@ -733,30 +600,12 @@ void Gateway::FlushPending()
   {
     Connection &connection = connections_[index];
     connection.pending_flush_ = false;
-    // A connection that waits for EPOLLOUT is flushed when the event comes.
-    if (connection.fd_.IsOpen() && !connection.want_write_)
+    if (connection.fd_.IsOpen())
     {
-      static_cast<void>(Flush(index));
+      SubmitSend(index);
     }
   }
   pending_flush_.clear();
-}
-
-bool Gateway::SetWriteInterest(std::uint32_t p_index, bool p_want_write)
-{
-  Connection &connection = connections_[p_index];
-  if (connection.want_write_ == p_want_write)
-  {
-    return true;
-  }
-  epoll_event event{.events = EPOLLIN | (p_want_write ? EPOLLOUT : 0U), .data = {.u64 = p_index}};
-  if (::epoll_ctl(sockets_.epoll_.Get(), EPOLL_CTL_MOD, connection.fd_.Get(), &event) != 0)
-  {
-    Close(p_index);
-    return false;
-  }
-  connection.want_write_ = p_want_write;
-  return true;
 }
 
 void Gateway::Close(std::uint32_t p_index)
@@ -772,30 +621,27 @@ void Gateway::Close(std::uint32_t p_index)
     sessions_[*connection.session_].connection_.reset();
     connection.session_.reset();
   }
-  if (sockets_.io_ == GatewayIo::Uring)
+  // Issue a queued send of this fd before the fd closes, so that a reply sent
+  // just before Close, such as a LogonReject, reaches the client. Then cancel
+  // what is in flight; the fd may close now, because each operation holds its
+  // own reference to the socket.
+  io_uring *const ring = sockets_.ring_.Get();
+  if (io_uring_sq_ready(ring) > 0)
   {
-    // Issue a queued send of this fd before the fd closes, as epoll's Flush
-    // writes before Close. Then cancel what is in flight; the fd may close
-    // now, because each operation holds its own reference to the socket.
-    io_uring *const ring = sockets_.ring_.Get();
-    if (io_uring_sq_ready(ring) > 0)
-    {
-      static_cast<void>(io_uring_submit(ring));
-    }
-    if (connection.recv_in_flight_)
-    {
-      SubmitCancel(UserData(Op::Recv, connection.generation_, p_index), 0);
-    }
-    if (connection.send_in_flight_)
-    {
-      SubmitCancel(UserData(Op::Send, connection.generation_, p_index), 0);
-    }
+    static_cast<void>(io_uring_submit(ring));
   }
-  connection.fd_.Reset(); // closing the fd also removes it from the epoll set
+  if (connection.recv_in_flight_)
+  {
+    SubmitCancel(UserData(Op::Recv, connection.generation_, p_index), 0);
+  }
+  if (connection.send_in_flight_)
+  {
+    SubmitCancel(UserData(Op::Send, connection.generation_, p_index), 0);
+  }
+  connection.fd_.Reset();
   connection.read_size_ = 0;
   connection.send_begin_ = 0;
   connection.send_end_ = 0;
-  connection.want_write_ = false;
   ReleaseIfIdle(p_index);
 }
 
