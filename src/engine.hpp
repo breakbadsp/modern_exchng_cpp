@@ -26,6 +26,8 @@
 namespace mex
 {
 
+class MarketDataPublisher;
+
 // Index of a session in the startup session list.
 using SessionId = std::uint32_t;
 
@@ -207,6 +209,10 @@ public:
   [[nodiscard]] bool Restore(std::span<const std::byte> p_snapshot);
   // When false, Apply changes state as usual but pushes no report. Default true.
   void SetReportsEnabled(bool p_enabled);
+
+  // Bind on the engine thread or before it starts.
+  void SetMarketData(MarketDataPublisher &p_publisher);
+  void RefreshMarketData();
 
   // Engine thread only. Busy-polls the inbound queue until Stop().
   void Run();

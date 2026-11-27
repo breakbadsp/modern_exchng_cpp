@@ -1,0 +1,71 @@
+:root {
+  color-scheme: dark;
+  font-family: "Inter", system-ui, sans-serif;
+  background: #101416;
+  color: #ebf0ed;
+  --surface: #171e20;
+  --edge: #334043;
+  --muted: #a6b4b4;
+  --green: #79e6b1;
+  --red: #ffad9b;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; }
+main { width: min(100% - 2rem, 66rem); margin: 3rem auto; }
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--edge);
+}
+
+.brand { color: var(--green); letter-spacing: .14em; font-weight: 700; font-size: .78rem; }
+h1 { font-size: clamp(1.9rem, 4vw, 3rem); margin: .25rem 0 0; letter-spacing: -.04em; }
+
+#status {
+  white-space: nowrap;
+  font-size: .8rem;
+  color: var(--muted);
+  padding: .45rem .7rem;
+  border: 1px solid var(--edge);
+  border-radius: .4rem;
+}
+
+#status[data-state="live"] { color: var(--green); }
+#status[data-state="reconnecting"] { color: #f5cf9b; }
+
+.summary {
+  display: grid;
+  grid-template-columns: minmax(5rem, 1fr) 1fr 1fr;
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.summary > * { display: grid; gap: .35rem; justify-items: start; color: var(--muted); font-size: .8rem; }
+.summary strong, select { font: 600 1rem ui-monospace, monospace; color: #ebf0ed; }
+.summary strong { overflow-wrap: anywhere; }
+select { min-width: 5rem; padding: .2rem .4rem; border: 1px solid var(--edge); border-radius: .25rem; background: var(--surface); }
+select:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
+
+.depth { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.side { border: 1px solid var(--edge); background: var(--surface); border-radius: .6rem; overflow: auto; }
+.bid { --side-color: var(--green); --bar-color: #213b34; }
+.ask { --side-color: var(--red); --bar-color: #3f2e2e; }
+h2 { color: var(--side-color); font-size: 1rem; padding: .9rem 1rem; margin: 0; }
+table { border-collapse: collapse; width: 100%; text-align: right; }
+th { color: var(--muted); font-size: .72rem; font-weight: 600; border-top: 1px solid var(--edge); border-bottom: 1px solid var(--edge); }
+th, td { padding: .45rem 1rem; }
+td { font: .83rem ui-monospace, monospace; }
+td:first-child { color: var(--side-color); }
+tbody tr { background: linear-gradient(to left, var(--bar-color) var(--depth, 0%), transparent 0); }
+td.empty { color: var(--muted); text-align: center; padding: 1.5rem 1rem; }
+
+@media (max-width: 42rem) {
+  main { margin-top: 1.5rem; }
+  .depth { grid-template-columns: 1fr; }
+}

@@ -240,5 +240,32 @@
         "invariant": "ReadPublishedItem"
       }
     ]
+  },
+  "market-data": {
+    "module": "models/MarketDataHandoff.tla",
+    "configs": [
+      "MarketDataHandoff.cfg"
+    ],
+    "ctest": [
+      "test_market_data_handoff",
+      "market_data_live"
+    ],
+    "source": [
+      "src/market_data.*",
+      "src/engine.*",
+      "src/main.cpp",
+      "src/replication.*",
+      "src/replicated_exchange.*",
+      "src/gateway.*",
+      "tools/market_data/*",
+      "tests/market_data*"
+    ],
+    "bounds": "One writer, one reader, three slots, four two-field snapshots.",
+    "mutations": [
+      {
+        "config": "MarketDataHandoffMutation.cfg",
+        "invariant": "OwnSlots"
+      }
+    ]
   }
 }

@@ -23,7 +23,8 @@ struct ReplicaArguments
 // Runs until p_stop_requested is true or the replica halts. Returns the
 // process exit status.
 [[nodiscard]] int RunReplicatedExchange(const Config &p_config, const ReplicaArguments &p_arguments,
-                                        const std::atomic<bool> &p_stop_requested)
+                                        const std::atomic<bool> &p_stop_requested,
+                                        MarketDataPublisher *p_market_data = nullptr)
     pre(p_arguments.replica_ < p_config.replicas_.size());
 
 } // namespace mex

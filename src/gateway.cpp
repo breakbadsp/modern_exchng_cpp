@@ -208,45 +208,57 @@ void UniqueFd::Reset()
   }
 }
 
-std::expected<GatewaySockets, std::string> OpenGatewaySockets(const GatewayConfig &p_config,
-                                                              GatewayIo p_io)
+std::expected<TcpListener, std::string> OpenTcpListener(const std::string &p_address,
+                                                        std::uint16_t p_port)
 {
-  GatewaySockets sockets{};
-  sockets.io_ = p_io;
-  sockets.listener_ = UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
-  if (!sockets.listener_.IsOpen())
+  TcpListener listener{};
+  listener.fd_ = UniqueFd{::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)};
+  if (!listener.fd_.IsOpen())
   {
     return SystemError("socket");
   }
   const int one = 1;
-  if (::setsockopt(sockets.listener_.Get(), SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0)
+  if (::setsockopt(listener.fd_.Get(), SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0)
   {
     return SystemError("setsockopt SO_REUSEADDR");
   }
   sockaddr_in address{};
   address.sin_family = AF_INET;
-  address.sin_port = htons(p_config.port_);
-  if (::inet_pton(AF_INET, p_config.listen_address_.c_str(), &address.sin_addr) != 1)
+  address.sin_port = htons(p_port);
+  if (::inet_pton(AF_INET, p_address.c_str(), &address.sin_addr) != 1)
   {
-    return std::unexpected(std::format("bad listen address {}", p_config.listen_address_));
+    return std::unexpected(std::format("bad listen address {}", p_address));
   }
   // The socket API takes every address family through sockaddr.
-  if (::bind(sockets.listener_.Get(), reinterpret_cast<const sockaddr *>(&address),
-             sizeof(address)) != 0)
+  if (::bind(listener.fd_.Get(), reinterpret_cast<const sockaddr *>(&address), sizeof(address)) !=
+      0)
   {
-    return SystemError(std::format("bind {}:{}", p_config.listen_address_, p_config.port_));
+    return SystemError(std::format("bind {}:{}", p_address, p_port));
   }
-  if (::listen(sockets.listener_.Get(), SOMAXCONN) != 0)
+  if (::listen(listener.fd_.Get(), SOMAXCONN) != 0)
   {
     return SystemError("listen");
   }
   socklen_t length = sizeof(address);
-  if (::getsockname(sockets.listener_.Get(), reinterpret_cast<sockaddr *>(&address), &length) != 0)
+  if (::getsockname(listener.fd_.Get(), reinterpret_cast<sockaddr *>(&address), &length) != 0)
   {
     return SystemError("getsockname");
   }
-  sockets.port_ = ntohs(address.sin_port);
+  listener.port_ = ntohs(address.sin_port);
 
+  return listener;
+}
+
+std::expected<GatewaySockets, std::string> OpenGatewaySockets(const GatewayConfig &p_config,
+                                                              GatewayIo p_io)
+{
+  auto listener = OpenTcpListener(p_config.listen_address_, p_config.port_);
+  if (!listener.has_value())
+  {
+    return std::unexpected(std::move(listener.error()));
+  }
+  GatewaySockets sockets{
+      .listener_ = std::move(listener->fd_), .port_ = listener->port_, .io_ = p_io};
   if (p_io == GatewayIo::Uring)
   {
     const std::uint64_t wanted =

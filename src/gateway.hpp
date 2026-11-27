@@ -83,6 +83,15 @@ enum class GatewayIo : std::uint8_t
   Uring,
 };
 
+struct TcpListener
+{
+  UniqueFd fd_{};
+  std::uint16_t port_ = 0;
+};
+
+[[nodiscard]] std::expected<TcpListener, std::string> OpenTcpListener(const std::string &p_address,
+                                                                      std::uint16_t p_port);
+
 // The listening socket and the poller of the chosen backend: an epoll set that
 // already watches the listener, or a ring that the gateway thread enables.
 struct GatewaySockets

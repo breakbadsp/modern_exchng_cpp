@@ -13,3 +13,4 @@ tla-loadgen	tools/loadgen.cpp verification/TLA/loadgen_test.py verification/TLA/
 tla-fault-game	tools/fault_game/* tests/fault_game_test.py verification/TLA/models/FaultGame*	verification/TLA/run check fault-game
 tla-libvsr	src/replicated_exchange.cpp	verification/TLA/run check libvsr
 tla-spsc-memory	src/spsc_queue.hpp tests/spsc_queue_test.cpp verification/TLA/models/SpscMemory*	verification/TLA/run check spsc-memory
+tla-market-data	src/market_data.* src/engine.* src/main.cpp src/replication.* src/replicated_exchange.* src/gateway.* tools/market_data/* tests/market_data* verification/TLA/models/MarketDataHandoff*	verification/TLA/run check market-data
