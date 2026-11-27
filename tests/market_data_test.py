@@ -28,10 +28,10 @@ def read_exact(sock, size):
 
 
 class Trader:
-    def __init__(self, sock):
+    def __init__(self, sock, session=b"alice"):
         self.sock = sock
         self.request = 0
-        self.send(1, struct.pack("<16s16s", b"alice", b"alice-secret"), 64)
+        self.send(1, struct.pack("<16s16s", session, session + b"-secret"), 64)
 
     def send(self, kind, body, expected):
         self.sock.sendall(struct.pack("<HB", 3 + len(body), kind) + body)
@@ -179,6 +179,34 @@ class MarketDataTest(unittest.TestCase):
             self.assertEqual(dict(delta["asks"]), {"130": "0", "140": "0"})
             self.assertIn(["140", "5"], delta["bids"])
 
+    def test_all_symbols_in_large_configuration(self):
+        """Receive a long catalog and every symbol snapshot in both clients."""
+        with contextlib.ExitStack() as stack, tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "exchange.cfg"
+            symbols = list(range(1_000_000_000, 1_000_016_385))
+            settings = (ROOT / "config/example.cfg").read_text().replace(
+                "gateway port 9000", f"gateway port {free_port()}")
+            config.write_text("\n".join(line for line in settings.splitlines()
+                                        if not line.startswith("symbol ")) + "\n" +
+                              "".join(f"symbol {symbol} {symbol % 2} 1 1 1 1000\n" for symbol in symbols))
+            _, (port, _) = start_exchange(stack, config)
+            reader = stack.enter_context(socket.socket())
+            reader.settimeout(4)
+            reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024)
+            reader.connect(("127.0.0.1", port))
+            wire = stack.enter_context(reader.makefile("rb"))
+            hello = wire.readline()
+            frames = [wire.readline() for _ in symbols]
+            self.assertGreater(len(hello) + sum(map(len, frames)), 1024 * 1024)
+            self.assertEqual(json.loads(hello)["symbols"], symbols)
+            self.assertEqual([json.loads(frame)["symbol"] for frame in frames], symbols)
+            _, (http_port,) = start(stack,
+                [sys.executable, "tools/market_data/client.py", "--feed-port", str(port),
+                 "--port", "0"], r"Order book at http://127\.0\.0\.1:(\d+)")
+            browser = stack.enter_context(urllib.request.urlopen(
+                f"http://127.0.0.1:{http_port}/events", timeout=4))
+            self.assertEqual([sse(browser, "book")["symbol"] for _ in symbols], symbols)
+
     def test_gap_requires_new_snapshot(self):
         """A client must discard its connection state after a sequence gap."""
         sys.path.insert(0, str(ROOT / "tools/market_data"))
@@ -221,11 +249,14 @@ class MarketDataTest(unittest.TestCase):
             self.assertEqual(message(stream, "update", 1)["bids"], [["100", "4"]])
             exchange.terminate()
             self.assertEqual(exchange.wait(timeout=5), 0)
+            survivor = stack.enter_context(socket.create_connection(("127.0.0.1", trade_ports[1]),
+                                                                      timeout=4))
+            Trader(survivor, b"bob").new(2, 99, 3)
             _, (market_port, _) = start_exchange(stack, config, data)
             message(feed(stack, market_port), ("snapshot", "update"), 1,
-                    lambda item: item["bids"] == [["100", "4"]])
+                    lambda item: ["99", "3"] in item["bids"])
             recovered = message(feed(stack, market_port), "snapshot", 1)
-            self.assertEqual(recovered["bids"], [["100", "4"]])
+            self.assertEqual(recovered["bids"], [["100", "4"], ["99", "3"]])
 
     def test_browser_stream_recovers_after_restart(self):
         """Check the page, live updates, stale state and a fresh book after restart."""

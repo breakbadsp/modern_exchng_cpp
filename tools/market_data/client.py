@@ -12,10 +12,12 @@ import time
 
 ASSETS = Path(__file__).resolve().parent
 MAX_LINE_BYTES = 8192
-MAX_SYMBOLS = 256
+# The symbol catalog is smaller than the exchange startup configuration.
+MAX_HELLO_BYTES = 1024 * 1024
 MAX_DEPTH = 20
 MAX_HTTP_CLIENTS = 32
 IO_TIMEOUT_SECONDS = 4
+SNAPSHOT_TIMEOUT_SECONDS = 30
 RECONNECT_SECONDS = 1
 BROWSER_HEARTBEAT_SECONDS = 2
 UINT64_MAX = (1 << 64) - 1
@@ -37,9 +39,9 @@ def integer(value, minimum, maximum):
     return result
 
 
-def read_message(stream):
-    line = stream.readline(MAX_LINE_BYTES + 1)
-    if not line or len(line) > MAX_LINE_BYTES or not line.endswith(b"\n"):
+def read_message(stream, limit=MAX_LINE_BYTES):
+    line = stream.readline(limit + 1)
+    if not line or len(line) > limit or not line.endswith(b"\n"):
         raise FeedError("closed connection or invalid frame length")
     item = json.loads(line)
     if not isinstance(item, dict):
@@ -79,7 +81,7 @@ class Stream:
         if (hello.get("type") != "hello" or type(hello.get("version")) is not int
                 or hello["version"] != 1 or type(depth) is not int
                 or not 1 <= depth <= MAX_DEPTH or not isinstance(symbols, list)
-                or not 1 <= len(symbols) <= MAX_SYMBOLS
+                or not symbols
                 or any(type(symbol) is not int or not 0 <= symbol <= 0xffffffff
                        for symbol in symbols)
                 or len(set(symbols)) != len(symbols)):
@@ -159,8 +161,8 @@ class FeedView:
 
 def consume(sock, view):
     with sock.makefile("rb") as stream:
-        decoder = Stream(read_message(stream))
-        deadline = time.monotonic() + IO_TIMEOUT_SECONDS
+        decoder = Stream(read_message(stream, MAX_HELLO_BYTES))
+        deadline = time.monotonic() + SNAPSHOT_TIMEOUT_SECONDS
         initial = {}
         for _ in decoder.symbols:
             book = decoder.apply(read_message(stream))

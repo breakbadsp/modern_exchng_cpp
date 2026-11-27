@@ -46,8 +46,10 @@ depth displays and current-book clients.
 A separate thread calculates and encodes changes. The matching thread copies
 up to 40 levels per command into fixed storage, with no socket calls, locks, or
 heap allocation. Up to 32 TCP subscribers share one publisher. The publisher
-closes a connection if more than 1 MiB of output would be pending or a write
-makes no progress for five seconds while output is pending.
+closes a connection if its pending output exceeds the byte limit or 256 batches, or
+if a write makes no progress for five seconds while output is pending. The byte
+limit starts at 1 MiB and grows with the configured symbol count to fit a full
+snapshot and changes for all symbols. Subscribers share serialized batches.
 
 Each replica publishes its locally applied book. A restart can rebuild some
 state from disk and learn more committed operations from peers. A replica can

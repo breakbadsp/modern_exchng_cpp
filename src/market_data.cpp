@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <deque>
 #include <format>
 #include <iterator>
 #include <print>
@@ -18,9 +19,16 @@ namespace mex
 namespace
 {
 
-constexpr std::size_t kMarketSymbolsMax = 256;
 constexpr std::size_t kSubscribersMax = 32;
-constexpr std::size_t kPendingBytesMax = 1024 * 1024;
+constexpr std::size_t kPendingBytesMin = 1024 * 1024;
+constexpr std::size_t kPendingBatchesMax = 256;
+constexpr std::size_t kSendCallsPerTick = 4;
+// A delta can remove and add a full side. Include both sides and the envelope.
+constexpr std::size_t kLevelBytesMax = 49;
+constexpr std::size_t kBookEnvelopeBytesMax = 128;
+constexpr std::size_t kBookFrameBytesMax =
+    4 * kMarketDepth * kLevelBytesMax + kBookEnvelopeBytesMax;
+using EncodedBatch = std::shared_ptr<const std::string>;
 constexpr auto kPublishInterval = std::chrono::milliseconds{20};
 constexpr auto kHeartbeatInterval = std::chrono::seconds{1};
 constexpr auto kSubscriberTimeout = std::chrono::seconds{5};
@@ -104,23 +112,23 @@ void AppendBook(std::string &p_json, wire::SymbolId p_symbol, std::uint64_t p_se
 struct Subscriber
 {
   UniqueFd socket_;
-  std::string pending_{};
+  std::deque<EncodedBatch> pending_{};
+  std::size_t pending_bytes_ = 0;
   std::size_t sent_ = 0;
   Clock::time_point progress_ = Clock::now();
 };
 
-// Partial writes retain their place in the stream. A slow socket can consume
-// at most one fixed budget. Close it before dropping any part of the stream.
-[[nodiscard]] bool Send(Subscriber &p_subscriber, std::string_view p_update,
-                        Clock::time_point p_now)
+// Share immutable batches across subscribers. A partial write holds its place
+// until the batch is sent or the connection runs out of its pending budget.
+[[nodiscard]] bool Send(Subscriber &p_subscriber, const EncodedBatch &p_update,
+                        std::size_t p_bytes_max, Clock::time_point p_now)
 {
   auto &pending = p_subscriber.pending_;
   auto &sent = p_subscriber.sent_;
-  if (!p_update.empty())
+  if (p_update)
   {
-    pending.erase(0, sent);
-    sent = 0;
-    if (pending.size() + p_update.size() > kPendingBytesMax)
+    if (pending.size() == kPendingBatchesMax ||
+        p_subscriber.pending_bytes_ + p_update->size() > p_bytes_max)
     {
       return false;
     }
@@ -128,22 +136,31 @@ struct Subscriber
     {
       p_subscriber.progress_ = p_now;
     }
-    pending += p_update;
+    pending.push_back(p_update);
+    p_subscriber.pending_bytes_ += p_update->size();
   }
-  if (sent == pending.size())
+
+  for (std::size_t call = 0; call < kSendCallsPerTick && !pending.empty(); ++call)
   {
-    return true;
-  }
-  const ssize_t count = ::send(p_subscriber.socket_.Get(), pending.data() + sent,
-                               pending.size() - sent, MSG_NOSIGNAL);
-  if (count > 0)
-  {
-    sent += static_cast<std::size_t>(count);
+    const auto &batch = *pending.front();
+    const ssize_t count =
+        ::send(p_subscriber.socket_.Get(), batch.data() + sent, batch.size() - sent, MSG_NOSIGNAL);
+    if (count <= 0)
+    {
+      return count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) &&
+             p_now - p_subscriber.progress_ < kSubscriberTimeout;
+    }
+    const auto written = static_cast<std::size_t>(count);
+    sent += written;
+    p_subscriber.pending_bytes_ -= written;
     p_subscriber.progress_ = p_now;
-    return true;
+    if (sent == batch.size())
+    {
+      pending.pop_front();
+      sent = 0;
+    }
   }
-  return count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) &&
-         p_now - p_subscriber.progress_ < kSubscriberTimeout;
+  return true;
 }
 
 } // namespace
@@ -192,10 +209,6 @@ MarketDataPublisher::MarketDataPublisher(TcpListener p_listener, const Config &p
 std::expected<MarketDataPublisher, std::string> MarketDataPublisher::Create(const Config &p_config,
                                                                             std::uint16_t p_port)
 {
-  if (p_config.symbols_.size() > kMarketSymbolsMax)
-  {
-    return std::unexpected(std::format("market data supports up to {} symbols", kMarketSymbolsMax));
-  }
   auto listener = OpenTcpListener(p_config.gateway_.listen_address_, p_port);
   if (!listener)
   {
@@ -248,6 +261,9 @@ void MarketDataPublisher::Run(std::stop_token p_stop)
 {
   std::vector<Subscriber> subscribers;
   subscribers.reserve(kSubscribersMax);
+  // Leave room for a full snapshot and a worst-case update for every symbol.
+  const std::size_t bytes_max =
+      std::max(kPendingBytesMin, hello_.size() + 2 * symbols_.size() * kBookFrameBytesMax);
   auto next_tick = Clock::now();
   auto next_heartbeat = next_tick + kHeartbeatInterval;
   while (!p_stop.stop_requested())
@@ -259,9 +275,12 @@ void MarketDataPublisher::Run(std::stop_token p_stop)
       updates += "{\"type\":\"heartbeat\"}\n";
       next_heartbeat = now + kHeartbeatInterval;
     }
-    std::erase_if(subscribers, [&](Subscriber &p_client) { return !Send(p_client, updates, now); });
+    const EncodedBatch batch =
+        updates.empty() ? nullptr : std::make_shared<const std::string>(std::move(updates));
+    std::erase_if(subscribers,
+                  [&](Subscriber &p_client) { return !Send(p_client, batch, bytes_max, now); });
 
-    std::optional<std::string> snapshot;
+    EncodedBatch snapshot;
     for (std::size_t count = 0; count < kSubscribersMax; ++count)
     {
       UniqueFd socket{
@@ -277,10 +296,10 @@ void MarketDataPublisher::Run(std::stop_token p_stop)
 
       if (!snapshot)
       {
-        snapshot = Snapshot();
+        snapshot = std::make_shared<const std::string>(Snapshot());
       }
       Subscriber client{.socket_ = std::move(socket)};
-      if (Send(client, *snapshot, now))
+      if (Send(client, snapshot, bytes_max, now))
       {
         subscribers.push_back(std::move(client));
       }
