@@ -96,6 +96,8 @@ jobs:
           if [[ -n "$BASE" ]] && git cat-file -e "$BASE^{commit}"; then
             .ci/ai-assets/scripts/kaizen-checks.sh --base "$BASE"
           else
-            .ci/ai-assets/scripts/kaizen-checks.sh --all
+            # A first push has no BASE. The script finds a merge base even with
+            # --all, and CI has no origin/HEAD, so give it one that exists.
+            .ci/ai-assets/scripts/kaizen-checks.sh --base HEAD --all
           fi
         shell: bash
