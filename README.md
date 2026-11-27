@@ -79,6 +79,12 @@ mode. Open the file from a local checkout for playback.
 
 The session owns its resting orders and its request numbers. Each run starts at request number 1, so a second run on the same session and exchange fails with a `DuplicateRequest` reject. Restart the exchange or use another session.
 
+## Market data
+
+Enable the Level 2 feed with `--market-data-port`. The Python client
+reconstructs the feed and shows bids and asks in a browser. See
+[setup and feed protocol](docs/market-data.md).
+
 ## Formatting
 
 Requires `clang-format` on `PATH`. After configure:

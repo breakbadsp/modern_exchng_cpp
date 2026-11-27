@@ -100,6 +100,14 @@ ExchangeStateMachine::ExchangeStateMachine(const Config &p_config,
 
 ExchangeStateMachine::~ExchangeStateMachine() = default;
 
+void ExchangeStateMachine::SetMarketData(MarketDataPublisher &p_publisher)
+{
+  for (const auto &slot : engines_)
+  {
+    slot->engine_.SetMarketData(p_publisher);
+  }
+}
+
 void ExchangeStateMachine::EmitReportsAfter(std::uint64_t p_op, std::uint64_t p_realtime_ns)
 {
   emit_after_op_ = p_op;
@@ -226,7 +234,15 @@ bool ExchangeStateMachine::Restore(std::span<const std::byte> p_snapshot)
     }
     offset += bytes;
   }
-  return offset == p_snapshot.size();
+  if (offset != p_snapshot.size())
+  {
+    return false;
+  }
+  for (const auto &slot : engines_)
+  {
+    slot->engine_.RefreshMarketData();
+  }
+  return true;
 }
 
 vsr::Config MakeVsrConfig(const Config &p_config, std::uint8_t p_replica,

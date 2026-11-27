@@ -98,7 +98,7 @@ endif()
 add_compile_options(-Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror)
 
 add_library(mex STATIC src/book.cpp src/config.cpp src/engine.cpp src/gateway.cpp
-    src/replication.cpp src/replicated_exchange.cpp)
+    src/replication.cpp src/replicated_exchange.cpp src/market_data.cpp)
 target_link_libraries(mex PUBLIC vsr_io)
 target_include_directories(mex PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
@@ -134,6 +134,9 @@ target_compile_definitions(test_config PRIVATE
 add_executable(test_replication tests/replication_test.cpp)
 target_link_libraries(test_replication PRIVATE mex GTest::gtest_main)
 
+add_executable(test_market_data_handoff tests/market_data_handoff_test.cpp)
+target_link_libraries(test_market_data_handoff PRIVATE mex GTest::gtest_main Threads::Threads)
+
 add_executable(test_gateway tests/gateway_test.cpp)
 target_link_libraries(test_gateway PRIVATE mex GTest::gtest_main Threads::Threads)
 
@@ -154,7 +157,7 @@ target_compile_options(bench_client PRIVATE -O3 -g -DNDEBUG -fno-omit-frame-poin
 # -O3 like bench_book. The exchange compiles the sources itself, because mex is
 # built with the preset's flags. Contracts stay on in the exchange.
 add_executable(mex_exchange src/main.cpp src/book.cpp src/config.cpp src/engine.cpp
-    src/gateway.cpp src/replication.cpp src/replicated_exchange.cpp)
+    src/gateway.cpp src/replication.cpp src/replicated_exchange.cpp src/market_data.cpp)
 target_include_directories(mex_exchange PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mex_exchange PRIVATE vsr_io Threads::Threads PkgConfig::LIBURING)
 target_compile_options(mex_exchange PRIVATE -O3 -DNDEBUG)
@@ -171,6 +174,7 @@ add_test(NAME test_engine COMMAND test_engine)
 add_test(NAME test_config COMMAND test_config)
 add_test(NAME test_replication COMMAND test_replication)
 add_test(NAME test_gateway COMMAND test_gateway)
+add_test(NAME test_market_data_handoff COMMAND test_market_data_handoff)
 # Loopback sockets: a lost frame must fail the run, not hang it.
 set_tests_properties(test_gateway test_spsc_queue test_engine test_book test_replication
     PROPERTIES TIMEOUT 120)
@@ -196,6 +200,9 @@ set_tests_properties(replicated_smoke PROPERTIES TIMEOUT 180)
 add_test(NAME bench_client_smoke COMMAND bench_client batch 1000 64)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME market_data_live COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/market_data_test.py $<TARGET_FILE:mex_exchange>)
+set_tests_properties(market_data_live PROPERTIES TIMEOUT 60)
 add_test(NAME tool_limits COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/tool_limits_test.py $<TARGET_FILE:mex_loadgen>)
 add_test(NAME perf_report COMMAND ${Python3_EXECUTABLE} -B -m unittest discover

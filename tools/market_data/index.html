@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Order book · MEX</title>
+  <link rel="stylesheet" href="/book.css">
+  <script src="/book.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="brand">MEX</div>
+        <h1>Order book</h1>
+      </div>
+      <output id="status" role="status">Connecting</output>
+    </header>
+    <section class="summary" aria-label="Book summary">
+      <label>Symbol <select id="symbol" disabled></select></label>
+      <div><span>Spread (ticks)</span><strong id="spread">—</strong></div>
+      <div><span>Sequence</span><strong id="sequence">—</strong></div>
+    </section>
+    <div class="depth">
+      <section class="side bid">
+        <h2>Bids</h2>
+        <table aria-label="Bids, best price first">
+          <thead><tr><th scope="col">Price (ticks)</th><th scope="col">Quantity</th></tr></thead>
+          <tbody id="bids"></tbody>
+        </table>
+      </section>
+      <section class="side ask">
+        <h2>Asks</h2>
+        <table aria-label="Asks, best price first">
+          <thead><tr><th scope="col">Price (ticks)</th><th scope="col">Quantity</th></tr></thead>
+          <tbody id="asks"></tbody>
+        </table>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

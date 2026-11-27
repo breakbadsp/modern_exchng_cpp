@@ -85,6 +85,8 @@ public:
   ExchangeStateMachine &operator=(ExchangeStateMachine &&) = delete;
   ~ExchangeStateMachine();
 
+  void SetMarketData(MarketDataPublisher &p_publisher);
+
   // Starts the reports. An operation pushes its reports only if its number is
   // above p_op and the primary made it at or after p_realtime_ns. All other
   // operations change state and push no report: a replica that starts

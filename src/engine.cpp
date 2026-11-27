@@ -1,5 +1,7 @@
 #include "engine.hpp"
 
+#include "market_data.hpp"
+
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -353,6 +355,7 @@ struct Engine::Instrument
   std::unique_ptr<OrderMeta[]> meta_;
   ClientOrderIndex index_;
   wire::SymbolId symbol_id_;
+  MarketBook *market_book_ = nullptr;
   std::unique_ptr<Book::RestingOrder[]> restore_orders_;
   std::unique_ptr<OrderId[]> restore_free_;
 };
@@ -399,6 +402,10 @@ void Engine::Apply(const Command &p_command)
         }
         last_request = p_order.request_number_;
         Execute(p_command.session_id_, inst, p_order);
+        if (inst.market_book_ != nullptr)
+        {
+          inst.market_book_->Publish(inst.book_);
+        }
       },
       p_command.order_);
 }
@@ -499,6 +506,26 @@ bool Engine::Restore(std::span<const std::byte> p_snapshot)
 }
 
 void Engine::SetReportsEnabled(bool p_enabled) { reports_enabled_ = p_enabled; }
+
+void Engine::SetMarketData(MarketDataPublisher &p_publisher)
+{
+  for (const auto &inst : instruments_)
+  {
+    inst->market_book_ = &p_publisher.ForSymbol(inst->symbol_id_);
+  }
+  RefreshMarketData();
+}
+
+void Engine::RefreshMarketData()
+{
+  for (const auto &inst : instruments_)
+  {
+    if (inst->market_book_ != nullptr)
+    {
+      inst->market_book_->Publish(inst->book_);
+    }
+  }
+}
 
 void Engine::Run()
 {

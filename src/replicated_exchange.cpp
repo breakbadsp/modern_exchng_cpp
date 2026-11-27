@@ -2,6 +2,7 @@
 
 #include "engine.hpp"
 #include "gateway.hpp"
+#include "market_data.hpp"
 #include "replication.hpp"
 #include "spsc_queue.hpp"
 #include "vsr/io/client.hpp"
@@ -124,7 +125,8 @@ std::uint64_t UnixTimeNs()
 } // namespace
 
 int RunReplicatedExchange(const Config &p_config, const ReplicaArguments &p_arguments,
-                          const std::atomic<bool> &p_stop_requested)
+                          const std::atomic<bool> &p_stop_requested,
+                          MarketDataPublisher *p_market_data)
 {
   const auto start_ns = UnixTimeNs();
   Config config = p_config;
@@ -143,12 +145,10 @@ int RunReplicatedExchange(const Config &p_config, const ReplicaArguments &p_argu
   const vsr::Config vsr_config =
       MakeVsrConfig(config, p_arguments.replica_, state_machine.SnapshotBytesMax());
   const auto addresses = ReplicaAddresses(config);
-  vsr::io::ServerOptions server_options;
-  server_options.config_ = vsr_config;
-  server_options.addresses_ = addresses;
-  server_options.data_path_ = p_arguments.data_path_;
-  // Create applies again the committed operations of the storage file.
-  auto server = vsr::io::Server::Create(std::move(server_options), state_machine);
+  // Load the stored checkpoint before attaching the market data publisher.
+  auto server = vsr::io::Server::Create(
+      {.config_ = vsr_config, .addresses_ = addresses, .data_path_ = p_arguments.data_path_},
+      state_machine);
   if (!server.has_value())
   {
     std::println(stderr, "mex_exchange: replica: {}", server.error());
@@ -156,11 +156,9 @@ int RunReplicatedExchange(const Config &p_config, const ReplicaArguments &p_argu
   }
   state_machine.EmitReportsAfter(server->GetReplica().Op(), start_ns);
 
-  vsr::io::ClientOptions client_options;
-  client_options.cluster_ = vsr_config.cluster_;
-  client_options.addresses_ = addresses;
-  client_options.body_bytes_max_ = vsr_config.body_bytes_max_;
-  auto client = vsr::io::Client::Create(std::move(client_options));
+  auto client = vsr::io::Client::Create({.cluster_ = vsr_config.cluster_,
+                                         .addresses_ = addresses,
+                                         .body_bytes_max_ = vsr_config.body_bytes_max_});
   if (!client.has_value())
   {
     std::println(stderr, "mex_exchange: replication client: {}", client.error());
@@ -169,6 +167,11 @@ int RunReplicatedExchange(const Config &p_config, const ReplicaArguments &p_argu
 
   ReplicationBridge bridge{std::move(*client), channels.queues_, vsr_config.body_bytes_max_};
   Gateway gateway{config, std::move(*sockets), channels.queues_};
+  if (p_market_data != nullptr)
+  {
+    state_machine.SetMarketData(*p_market_data);
+  }
+  const auto market_thread = p_market_data != nullptr ? p_market_data->Start() : std::jthread{};
 
   const auto halt_reason =
       RunThreads(*server, gateway, bridge, p_stop_requested,
@@ -179,7 +182,6 @@ int RunReplicatedExchange(const Config &p_config, const ReplicaArguments &p_argu
                                 config.replicas_.size());
                    std::fflush(stdout);
                  });
-  // Replicas that committed the same operations print the same digest.
   std::println("mex_exchange: state digest {:016x} at operation {}", state_machine.StateDigest(),
                server->GetReplica().CommitMin());
   std::println("mex_exchange: bridge abandoned orders: {}", bridge.AbandonedOrders());

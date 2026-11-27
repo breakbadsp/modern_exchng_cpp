@@ -1,6 +1,7 @@
 #include "config.hpp"
 #include "engine.hpp"
 #include "gateway.hpp"
+#include "market_data.hpp"
 #include "replicated_exchange.hpp"
 #include "spsc_queue.hpp"
 
@@ -41,6 +42,7 @@ using mex::Engine;
 using mex::EngineQueues;
 using mex::Gateway;
 using mex::GatewayIo;
+using mex::MarketDataPublisher;
 using mex::Report;
 using mex::SpscQueue;
 
@@ -110,10 +112,11 @@ void OnStopSignal(int) { stop_requested.store(true, std::memory_order_relaxed); 
 // What main owns for one engine. The Engine itself lives on its thread.
 struct EngineSlot
 {
-  EngineSlot(const mex::EngineConfig &p_config, const Config &p_exchange)
+  EngineSlot(const mex::EngineConfig &p_config, const Config &p_exchange,
+             MarketDataPublisher *p_market_data)
       : config_{p_config}, session_count_{p_exchange.sessions_.size()},
         inbound_{p_exchange.gateway_.inbound_queue_capacity_},
-        outbound_{p_exchange.gateway_.outbound_queue_capacity_}
+        outbound_{p_exchange.gateway_.outbound_queue_capacity_}, market_data_{p_market_data}
   {
   }
 
@@ -121,6 +124,7 @@ struct EngineSlot
   std::size_t session_count_;
   SpscQueue<Command> inbound_;
   SpscQueue<Report> outbound_;
+  MarketDataPublisher *market_data_;
   std::uint64_t stalls_ = 0; // written by the engine thread before it ends
 };
 
@@ -143,6 +147,10 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
                  p_slot.config_.core_, std::strerror(pinned.error()));
   }
   Engine engine{p_slot.config_.books_, p_slot.session_count_, p_slot.inbound_, p_slot.outbound_};
+  if (p_slot.market_data_ != nullptr)
+  {
+    engine.SetMarketData(*p_slot.market_data_);
+  }
   // The callback runs on the thread that requests the stop. The destructor of
   // stop_engine waits for a running callback, so engine outlives it.
   const std::stop_callback stop_engine{p_stop, [&engine] { engine.Stop(); }};
@@ -151,7 +159,8 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
   p_slot.stalls_ = engine.OutboundStalls();
 }
 
-[[nodiscard]] int RunExchange(const Config &p_config, GatewayIo p_io)
+[[nodiscard]] int RunExchange(const Config &p_config, GatewayIo p_io,
+                              MarketDataPublisher *p_market_data)
 {
   if (const auto installed = InstallStopHandler(); !installed.has_value())
   {
@@ -170,7 +179,7 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
   std::vector<EngineQueues> queues;
   for (const mex::EngineConfig &engine_config : p_config.engines_)
   {
-    slots.push_back(std::make_unique<EngineSlot>(engine_config, p_config));
+    slots.push_back(std::make_unique<EngineSlot>(engine_config, p_config, p_market_data));
     queues.push_back({slots.back()->inbound_, slots.back()->outbound_});
   }
 
@@ -181,6 +190,7 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
     engine_threads.emplace_back(RunEngine, std::ref(*slots[index]), std::ref(engines_ready), index);
   }
   engines_ready.wait();
+  const auto market_thread = p_market_data != nullptr ? p_market_data->Start() : std::jthread{};
 
   Gateway gateway{p_config, std::move(*sockets), queues};
   std::jthread gateway_thread{
@@ -220,24 +230,60 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
   return 0;
 }
 
+struct Arguments
+{
+  GatewayIo io_ = GatewayIo::Epoll;
+  std::optional<std::uint16_t> market_port_{};
+  std::size_t next_ = 2;
+};
+
+[[nodiscard]] std::optional<Arguments> ParseOptions(std::span<char *const> p_args)
+{
+  Arguments options;
+  if (p_args.size() >= 4 && std::string_view{p_args[2]} == "--io")
+  {
+    const auto io = ParseGatewayIo(p_args[3]);
+    if (!io)
+    {
+      return std::nullopt;
+    }
+    options.io_ = *io;
+    options.next_ += 2;
+  }
+  if (p_args.size() > options.next_ &&
+      std::string_view{p_args[options.next_]} == "--market-data-port")
+  {
+    if (p_args.size() <= options.next_ + 1)
+    {
+      return std::nullopt;
+    }
+    const std::string_view number{p_args[options.next_ + 1]};
+    std::uint16_t port = 0;
+    const auto result = std::from_chars(number.data(), number.data() + number.size(), port);
+    if (result.ec != std::errc{} || result.ptr != number.data() + number.size())
+    {
+      return std::nullopt;
+    }
+    options.market_port_ = port;
+    options.next_ += 2;
+  }
+  if (p_args.size() != options.next_ && p_args.size() != options.next_ + 2)
+  {
+    return std::nullopt;
+  }
+  return options;
+}
+
 } // namespace
 
 int main(int p_argc, char **p_argv)
 {
-  // <config path> [--io epoll|uring] [<replica number> <data path>]
   const std::span<char *const> args{p_argv, static_cast<std::size_t>(p_argc)};
-  std::optional<GatewayIo> io = GatewayIo::Epoll;
-  std::size_t next = 2;
-  if (args.size() >= 4 && std::string_view{args[2]} == "--io")
-  {
-    io = ParseGatewayIo(args[3]);
-    next = 4;
-  }
-  const std::size_t rest = args.size() >= next ? args.size() - next : 1;
-  if ((rest != 0 && rest != 2) || !io.has_value())
+  const auto options = ParseOptions(args);
+  if (!options)
   {
     std::println(stderr, "usage: mex_exchange <config path> [--io epoll|uring] "
-                         "[<replica number> <data path>]");
+                         "[--market-data-port <port>] [<replica number> <data path>]");
     return kExitUsage;
   }
   const char *const path = args[1];
@@ -255,17 +301,30 @@ int main(int p_argc, char **p_argv)
     }
     return kExitFailure;
   }
-  const bool replicated = rest == 2;
+  const bool replicated = args.size() == options->next_ + 2;
   if (replicated != !config->replicas_.empty())
   {
     std::println(stderr, "mex_exchange: a config with replica records needs <replica number> "
                          "<data path>, and a config without them takes neither");
     return kExitUsage;
   }
+  std::optional<MarketDataPublisher> market_data;
+  if (options->market_port_)
+  {
+    auto publisher = MarketDataPublisher::Create(*config, *options->market_port_);
+    if (!publisher)
+    {
+      std::println(stderr, "mex_exchange: market data: {}", publisher.error());
+      return kExitFailure;
+    }
+    market_data.emplace(std::move(*publisher));
+  }
+  auto *const market_publisher = market_data ? &*market_data : nullptr;
   if (!replicated)
   {
-    return RunExchange(*config, *io);
+    return RunExchange(*config, options->io_, market_publisher);
   }
+  const std::size_t next = options->next_;
   const std::string_view replica_text{args[next]};
   std::uint8_t replica = 0;
   const auto parsed =
@@ -283,5 +342,6 @@ int main(int p_argc, char **p_argv)
     return kExitFailure;
   }
   return mex::RunReplicatedExchange(
-      *config, {.replica_ = replica, .data_path_ = args[next + 1], .io_ = *io}, stop_requested);
+      *config, {.replica_ = replica, .data_path_ = args[next + 1], .io_ = options->io_},
+      stop_requested, market_publisher);
 }
