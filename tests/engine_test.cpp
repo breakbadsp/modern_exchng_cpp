@@ -1,4 +1,6 @@
+#include "config.hpp"
 #include "engine.hpp"
+#include "market_data.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1494,3 +1496,70 @@ TEST(EngineTest, RunsOnItsOwnThreadWithRealQueues)
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Market data
+
+// A feed for the harness symbols. Port 0 lets the kernel pick a free port. No
+// feed thread runs, so each test takes the views itself.
+mex::Config FeedConfig()
+{
+  mex::Config config{};
+  for (const mex::wire::SymbolId symbol : kSymbols)
+  {
+    config.symbols_.push_back(
+        {.symbol_id_ = symbol, .min_price_ = Price{1}, .max_price_ = Price{1'000'000}});
+  }
+  config.gateway_.listen_address_ = "127.0.0.1";
+  return config;
+}
+
+TEST(EngineMarketDataTest, PublishesOneViewOfTheLastCommandWhenTheQueueEmpties)
+{
+  Harness h;
+  auto publisher = mex::MarketDataPublisher::Create(FeedConfig(), 0);
+  ASSERT_TRUE(publisher.has_value()) << publisher.error();
+  h.EngineRef().SetMarketData(*publisher);
+  mex::MarketBook &market = publisher->ForSymbol(kSymbols[0]);
+  ASSERT_TRUE(market.Take().has_value()); // the view when the feed was bound
+
+  for (const std::int64_t price : {99, 98, 97})
+  {
+    const auto id = static_cast<ClientOrderId>(100 - price);
+    ASSERT_TRUE(h.Inbound().TryPush(h.Next(Limit(kA, id, Side::Buy, price, 10))));
+  }
+  for (int count = 0; count < 3; ++count)
+  {
+    ASSERT_TRUE(h.EngineRef().ProcessOne());
+  }
+  EXPECT_FALSE(market.Take().has_value()) << "a view for each command";
+
+  EXPECT_FALSE(h.EngineRef().ProcessOne());
+  const std::optional<mex::MarketDepth> view = market.Take();
+  ASSERT_TRUE(view.has_value());
+  EXPECT_EQ(view->bid_count_, 3U);
+  EXPECT_EQ(view->bids_[2].price_, Price{97});
+}
+
+TEST(EngineMarketDataTest, PublishesWithinABatchWhileTheQueueStaysBusy)
+{
+  Harness h{mex::kMarketDataBatch + 1};
+  auto publisher = mex::MarketDataPublisher::Create(FeedConfig(), 0);
+  ASSERT_TRUE(publisher.has_value()) << publisher.error();
+  h.EngineRef().SetMarketData(*publisher);
+  mex::MarketBook &market = publisher->ForSymbol(kSymbols[0]);
+  ASSERT_TRUE(market.Take().has_value());
+
+  // One command stays queued, so the engine never finds the queue empty.
+  for (ClientOrderId id = 1; id <= mex::kMarketDataBatch + 1; ++id)
+  {
+    ASSERT_TRUE(h.Inbound().TryPush(h.Next(Limit(kA, id, Side::Buy, 100, 1))));
+  }
+  for (std::uint32_t count = 0; count < mex::kMarketDataBatch; ++count)
+  {
+    ASSERT_TRUE(h.EngineRef().ProcessOne());
+  }
+  const std::optional<mex::MarketDepth> view = market.Take();
+  ASSERT_TRUE(view.has_value());
+  EXPECT_EQ(view->bids_[0].quantity_, mex::kMarketDataBatch);
+}

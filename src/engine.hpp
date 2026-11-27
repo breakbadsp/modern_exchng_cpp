@@ -146,6 +146,12 @@ struct BookConfig
   std::uint32_t max_price_levels_ = 0;
 };
 
+// The market feed samples each book every 20 ms, so one view per command is
+// wasted work: copying the depth cost about as much as the command itself. The
+// engine publishes the books that changed when its inbound queue is empty, or
+// after this many commands while the queue stays busy.
+constexpr std::uint32_t kMarketDataBatch = 64;
+
 // Each NewOrder, Cancel, and Replace gets its fills (maker report, then taker
 // reports) and then exactly one final report:
 //   NewOrder: Ack (rests, or fully filled with leaves 0), Reject, or Done.
@@ -213,6 +219,9 @@ public:
   // Bind on the engine thread or before it starts.
   void SetMarketData(MarketDataPublisher &p_publisher);
   void RefreshMarketData();
+  // Engine thread only. Publishes each book that changed since the last call.
+  // ProcessOne calls it; a caller of Apply calls it after each batch of commands.
+  void PublishMarketData();
 
   // Engine thread only. Busy-polls the inbound queue until Stop().
   void Run();
@@ -239,6 +248,10 @@ private:
   void Emit(SessionId p_session, const OrderReport &p_report);
 
   std::vector<std::unique_ptr<Instrument>> instruments_{};
+  // Books with a market view not yet published, each at most once. The capacity
+  // is the instrument count, so a push never allocates.
+  std::vector<Instrument *> stale_markets_{};
+  std::uint32_t commands_since_publish_ = 0;
   std::vector<wire::RequestNumber> client_table_{}; // by SessionId; 0 means none applied
   OpNumber last_applied_op_{};
   bool reports_enabled_ = true;

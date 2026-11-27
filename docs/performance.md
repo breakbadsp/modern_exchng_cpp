@@ -106,6 +106,56 @@ tools/perf_multi_client.sh build 4 1000000 64 0          # closed loop, 4 client
 tools/perf_multi_client.sh build 4 400000 4096 25000     # open loop, 4 x 25k = 100k ops/s
 ```
 
+## Thread limits and cache-line sharing
+
+Measured on 2026-11-27 with `perf` (same machine, Linux 7.2.15, perf 7.2.11,
+`perf_event_paranoid` 2). The load was `tools/perf_multi_client.sh` with 4
+clients, closed loop. `perf` attached to the exchange for 3–5 s of steady load.
+
+| Window | Total ops/s | Engine CPU | Gateway user / kernel | 4 clients on 3 cores |
+|-------:|------------:|-----------:|----------------------:|---------------------:|
+| 64 | 3.3M | 100% each (spin) | 19% / 43% | saturated |
+| 4096 | 6.0M | 100% each (spin) | 36% / 36% | 286% of 300% |
+
+- The clients are the limit on this 6-core host. The gateway has 28–38% idle
+  time, and each engine is busy only about 12% of its time. So a faster
+  exchange does not show as more throughput in these tests. Measure engine work
+  with `bench_engine` (below).
+- `perf c2c` found no false sharing. All hot lines have HITM loads at offset 0
+  only: the engines read the inbound `SpscQueue::tail_`, and the gateway reads
+  the outbound `tail_`. That is the true sharing that the queue design expects.
+  Command and report slots share lines one at a time, also as designed.
+- In the engine, `ClientOrderIndex::Find` has most DRAM loads. Each new
+  client order ID hashes to a random line of the index. With `max_orders`
+  1,000,000 instead of 4,096, this adds about 13 ns to each command.
+
+How to repeat: the `perf-profiling` and `perf-false-sharing` skills in
+[ai-assets](https://github.com/breakbadsp/ai-assets) give the commands.
+
+## Engine thread
+
+`bench_engine` (`tests/engine_bench.cpp`) feeds one engine from its own thread
+with the `mex_loadgen` order mix, and reports the mean time for each command,
+from the inbound queue to its reports. It builds like `mex_exchange` (-O3,
+contracts on). Each value is the median of 5 runs of 4M commands on core 4.
+
+| `max_orders` | Market data | Before | After |
+|-------------:|------------:|-------:|------:|
+| 4,096 | off | 102 | 106 |
+| 4,096 | on | 206 | 107 |
+| 1,000,000 | off | 115 | 118 |
+| 1,000,000 | on | 220 | 119 |
+
+Values are ns per command. "Before" published the depth after every command.
+`MarketBook::Publish` then used about a quarter of all engine cycles, so the
+feed halved the capacity of each engine. "After" publishes each changed book
+once per batch (`kMarketDataBatch`). The "off" rows did not change; their
+difference is run-to-run variation.
+
+```bash
+taskset -c 4 ./build/bench_engine
+```
+
 ## Client I/O
 
 ### How the gateway does client I/O
