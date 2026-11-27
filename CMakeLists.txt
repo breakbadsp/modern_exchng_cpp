@@ -202,6 +202,7 @@ set_tests_properties(replicated_smoke PROPERTIES TIMEOUT 180)
 # The flow checks its fill totals and final book state; contracts are off here.
 add_test(NAME bench_client_smoke COMMAND bench_client batch 1000 64)
 add_test(NAME bench_engine_smoke COMMAND bench_engine 1000)
+add_test(NAME bench_depth_capture_smoke COMMAND bench_engine --depth-capture 1000)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME market_data_live COMMAND ${Python3_EXECUTABLE}
@@ -216,7 +217,8 @@ file(GLOB_RECURSE MEX_FORMAT_SOURCES CONFIGURE_DEPENDS
     src/*.cpp src/*.hpp tests/*.cpp tests/*.hpp tools/*.cpp tools/*.hpp benchmarks/*.cpp)
 list(APPEND MEX_FORMAT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/verification/TLA/matching/replay.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/verification/TLA/bridge/replay.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/verification/TLA/bridge/replay.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/verification/Lean/depth_replay.cpp)
 option(MEX_REQUIRE_STYLE_TOOLS "Require Universal Ctags for the style test" OFF)
 find_program(CTAGS_EXECUTABLE NAMES ctags-universal universal-ctags ctags)
 if(MEX_REQUIRE_STYLE_TOOLS AND NOT CTAGS_EXECUTABLE)
@@ -245,3 +247,4 @@ else()
 endif()
 
 add_subdirectory(verification/TLA)
+add_subdirectory(verification/Lean)

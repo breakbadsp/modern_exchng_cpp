@@ -41,7 +41,7 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update
-          apt-get install --yes --no-install-recommends cmake ninja-build libgtest-dev liburing-dev pkg-config python3 clang-format universal-ctags
+          apt-get install --yes --no-install-recommends cmake ninja-build libgtest-dev liburing-dev pkg-config python3 clang-format universal-ctags curl zstd
 
       # libvsr is private. This key has read-only access to that repository.
       - name: Check out libvsr
@@ -54,8 +54,26 @@ jobs:
           ssh-key: ${{ secrets.LIBVSR_SSH_KEY }}
           persist-credentials: false
 
+      - name: Install Lean
+        if: matrix.preset == 'ninja'
+        run: |
+          version="$(cut -d: -f2 verification/Lean/lean-toolchain)"
+          release="lean-${version#v}-linux"
+          archive="$RUNNER_TEMP/$release.tar.zst"
+          curl --fail --location --silent --show-error --retry 3 --max-time 180 \
+            "https://github.com/leanprover/lean4/releases/download/$version/$release.tar.zst" \
+            -o "$archive"
+          printf '%s  %s\n' ceb3a3f844f7aebf63245e2b51c28d5b0ed38942c19f93cf3febd520302160bd "$archive" |
+            sha256sum --check
+          tar --zstd -xf "$archive" -C "$RUNNER_TEMP" "$release/bin/lean" "$release/lib/lean"
+          rm "$archive"
+          printf '%s\n' "$RUNNER_TEMP/$release/bin" >> "$GITHUB_PATH"
+
       - name: Configure
-        run: cmake --preset "${{ matrix.preset }}" -DMEX_REQUIRE_STYLE_TOOLS=ON -DMEX_LIBVSR_SOURCE_DIR="$GITHUB_WORKSPACE/.ci/libvsr"
+        run: |
+          cmake --preset "${{ matrix.preset }}" -DMEX_REQUIRE_STYLE_TOOLS=ON \
+            -DMEX_LIBVSR_SOURCE_DIR="$GITHUB_WORKSPACE/.ci/libvsr" \
+            -DMEX_VERIFY_LEAN="${{ matrix.preset == 'ninja' }}"
 
       - name: Check C++ format
         if: matrix.preset == 'ninja'
@@ -65,11 +83,12 @@ jobs:
         run: cmake --build --preset "${{ matrix.preset }}" --parallel 2
 
       - name: Test
-        run: ctest --preset "${{ matrix.preset }}" --output-on-failure --no-tests=error
+        # KaizenFlow runs the Lean check when its inputs change.
+        run: ctest --preset "${{ matrix.preset }}" -E '^lean_verification$' --output-on-failure --no-tests=error
 
       - name: Install TLA+ prerequisites
         if: matrix.preset == 'ninja'
-        run: apt-get install --yes --no-install-recommends default-jre-headless curl
+        run: apt-get install --yes --no-install-recommends default-jre-headless
 
       - name: Check out KaizenFlow
         if: matrix.preset == 'ninja'
@@ -80,7 +99,7 @@ jobs:
           path: .ci/ai-assets
           persist-credentials: false
 
-      - name: Verify TLA+ specifications
+      - name: Run KaizenFlow verification
         if: matrix.preset == 'ninja'
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}

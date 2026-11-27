@@ -156,6 +156,17 @@ difference is run-to-run variation.
 taskset -c 4 ./build/bench_engine
 ```
 
+### Market depth capture
+
+`bench_engine --depth-capture` times the capture and handoff of a book with
+20 visible levels and one hidden level per side. On the i5-9500 with GCC
+16.2.1 and contracts enabled, the median fell from 95.6 ns to 28.2 ns per
+capture. The benchmark used five interleaved runs for each build on core 4,
+with each run reporting its median over five sets of 4M captures. Three
+interleaved runs of the regular engine benchmark showed no clear change in
+time per command. [Lean verification](../verification/Lean/README.md)
+checks the traversal and gives the benchmark commands.
+
 ## Client I/O
 
 ### How the gateway does client I/O

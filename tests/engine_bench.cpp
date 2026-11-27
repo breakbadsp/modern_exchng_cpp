@@ -2,6 +2,7 @@
 // queue to its reports in the outbound queue, with the order mix of
 // mex_loadgen. The end-to-end tests cannot show this cost, because the engine
 // thread spins while it waits and the load generators saturate first.
+#include "book.hpp"
 #include "config.hpp"
 #include "engine.hpp"
 #include "market_data.hpp"
@@ -204,14 +205,59 @@ Measure(std::uint32_t p_max_orders, MarketDataPublisher *p_market_data, std::uin
   return value;
 }
 
+// Time capture and handoff with a full visible depth on both sides.
+[[nodiscard]] int BenchDepthCapture(std::uint64_t p_captures)
+{
+  constexpr auto kLevelsPerSide = static_cast<std::uint32_t>(kMarketDepth + 1);
+  Book book{2 * kLevelsPerSide, kLevelsPerSide};
+  for (std::uint32_t index = 0; index < kLevelsPerSide; ++index)
+  {
+    const auto price = static_cast<std::int64_t>(index);
+    const auto bid = book.SubmitLimitOrder(Side::Buy, Price{kMid - price}, Quantity{1});
+    const auto ask = book.SubmitLimitOrder(Side::Sell, Price{kMid + price + 1}, Quantity{1});
+    if (bid.order_id_ == kInvalidOrderId || ask.order_id_ == kInvalidOrderId)
+    {
+      return EXIT_FAILURE;
+    }
+  }
+
+  MarketBook channel;
+  std::array<double, kRepeats> results{};
+  for (double &result : results)
+  {
+    const auto start = Clock::now();
+    for (std::uint64_t count = 0; count < p_captures; ++count)
+    {
+      channel.Publish(book);
+    }
+    const std::chrono::duration<double, std::nano> elapsed = Clock::now() - start;
+    result = elapsed.count() / static_cast<double>(p_captures);
+  }
+  const auto view = channel.Take();
+  if (!view || view->bid_count_ != kMarketDepth || view->ask_count_ != kMarketDepth)
+  {
+    return EXIT_FAILURE;
+  }
+  std::ranges::sort(results);
+  std::println("{:.1f} ns/capture, {} captures, median of {} runs", results[kRepeats / 2],
+               p_captures, kRepeats);
+  return EXIT_SUCCESS;
+}
+
 [[nodiscard]] int Main(std::span<char *const> p_args)
 {
+  const bool depth_capture = p_args.size() > 1 && std::string_view{p_args[1]} == "--depth-capture";
+  const auto arguments = depth_capture ? p_args.subspan(1) : p_args;
   const std::optional<std::uint64_t> commands =
-      p_args.size() > 1 ? ParseCommands(p_args[1]) : kDefaultCommands;
-  if (p_args.size() > 2 || !commands.has_value())
+      arguments.size() > 1 ? ParseCommands(arguments[1]) : kDefaultCommands;
+  if (arguments.size() > 2 || !commands.has_value())
   {
-    std::println(stderr, "usage: bench_engine [commands, 4 to {}]", kMaxCommands);
+    std::println(stderr, "usage: bench_engine [--depth-capture] [count, 4 to {}]", kMaxCommands);
     return EXIT_FAILURE;
+  }
+  if (depth_capture)
+  {
+    return BenchDepthCapture(*commands);
   }
   Config config{};
   config.symbols_.push_back(

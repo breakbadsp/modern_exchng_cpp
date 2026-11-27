@@ -36,11 +36,13 @@ using Clock = std::chrono::steady_clock;
 
 void Capture(const PriceLadder &p_ladder, std::span<DepthLevel> p_levels)
 {
-  // Both ladders keep their best price at the end.
-  for (std::size_t index = 0; index < p_levels.size(); ++index)
+  // Publish clamps the count to the ladder size. Walk from the best price
+  // without a checked ladder lookup for every level.
+  auto cursor = std::make_reverse_iterator(p_ladder.end());
+  for (auto &captured : p_levels)
   {
-    const auto &level = p_ladder[p_ladder.size() - 1 - index];
-    p_levels[index] = {level.price_, level.total_qty_};
+    const auto &level = *cursor++;
+    captured = {level.price_, level.total_qty_};
   }
 }
 
