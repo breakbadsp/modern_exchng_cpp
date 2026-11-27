@@ -17,7 +17,6 @@ MAX_HELLO_BYTES = 1024 * 1024
 MAX_DEPTH = 20
 MAX_HTTP_CLIENTS = 32
 IO_TIMEOUT_SECONDS = 4
-SNAPSHOT_TIMEOUT_SECONDS = 30
 RECONNECT_SECONDS = 1
 BROWSER_HEARTBEAT_SECONDS = 2
 UINT64_MAX = (1 << 64) - 1
@@ -162,12 +161,11 @@ class FeedView:
 def consume(sock, view):
     with sock.makefile("rb") as stream:
         decoder = Stream(read_message(stream, MAX_HELLO_BYTES))
-        deadline = time.monotonic() + SNAPSHOT_TIMEOUT_SECONDS
         initial = {}
         for _ in decoder.symbols:
             book = decoder.apply(read_message(stream))
-            if not book or time.monotonic() > deadline:
-                raise FeedError("snapshot did not complete in time")
+            if book is None:
+                raise FeedError("expected a snapshot")
             initial[book["symbol"]] = event("book", book)
         view.set_state("live", initial)
         while True:

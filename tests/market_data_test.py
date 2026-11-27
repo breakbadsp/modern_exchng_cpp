@@ -1,6 +1,7 @@
 """Drive the trading socket, market feed, and HTTP client as separate processes."""
 
 import contextlib
+import io
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import time
 import unittest
 import urllib.request
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -206,6 +208,34 @@ class MarketDataTest(unittest.TestCase):
             browser = stack.enter_context(urllib.request.urlopen(
                 f"http://127.0.0.1:{http_port}/events", timeout=4))
             self.assertEqual([sse(browser, "book")["symbol"] for _ in symbols], symbols)
+
+    def test_snapshot_finishes_with_steady_progress(self):
+        """A snapshot can take longer than 30 seconds if frames keep arriving."""
+        sys.path.insert(0, str(ROOT / "tools/market_data"))
+        from client import FeedError, FeedView, consume
+
+        symbols = list(range(1, 41))
+        frames = [{"type": "hello", "version": 1, "depth": 20, "symbols": symbols}]
+        frames.extend({"type": "snapshot", "symbol": symbol, "seq": "0",
+                       "bids": [], "asks": []} for symbol in symbols)
+        seconds = 0
+
+        class SteadyStream(io.BytesIO):
+            def readline(self, size=-1):
+                nonlocal seconds
+                seconds += 1
+                return super().readline(size)
+
+        data = b"".join(json.dumps(frame).encode() + b"\n" for frame in frames)
+        connection = Mock()
+        connection.makefile.return_value = SteadyStream(data)
+        view = FeedView()
+        with patch("client.time.monotonic", side_effect=lambda: seconds):
+            with self.assertRaises(FeedError):
+                consume(connection, view)
+        self.assertGreater(seconds, 30)
+        self.assertEqual(view.state, "live")
+        self.assertEqual(list(view.books), symbols)
 
     def test_gap_requires_new_snapshot(self):
         """A client must discard its connection state after a sequence gap."""
