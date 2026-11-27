@@ -41,7 +41,6 @@ using mex::Config;
 using mex::Engine;
 using mex::EngineQueues;
 using mex::Gateway;
-using mex::GatewayIo;
 using mex::MarketDataPublisher;
 using mex::Report;
 using mex::SpscQueue;
@@ -55,24 +54,6 @@ constexpr std::size_t kThreadNameBytes = 16;
 // Set by the signal handler. A lock-free atomic store is signal-safe.
 std::atomic<bool> stop_requested{false};
 static_assert(std::atomic<bool>::is_always_lock_free);
-
-[[nodiscard]] std::optional<GatewayIo> ParseGatewayIo(std::string_view p_text)
-{
-  if (p_text == "epoll")
-  {
-    return GatewayIo::Epoll;
-  }
-  if (p_text == "uring")
-  {
-    return GatewayIo::Uring;
-  }
-  return std::nullopt;
-}
-
-[[nodiscard]] std::string_view NameOf(GatewayIo p_io)
-{
-  return p_io == GatewayIo::Uring ? "uring" : "epoll";
-}
 
 void OnStopSignal(int) { stop_requested.store(true, std::memory_order_relaxed); }
 
@@ -159,15 +140,14 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
   p_slot.stalls_ = engine.OutboundStalls();
 }
 
-[[nodiscard]] int RunExchange(const Config &p_config, GatewayIo p_io,
-                              MarketDataPublisher *p_market_data)
+[[nodiscard]] int RunExchange(const Config &p_config, MarketDataPublisher *p_market_data)
 {
   if (const auto installed = InstallStopHandler(); !installed.has_value())
   {
     std::println(stderr, "mex_exchange: sigaction: {}", std::strerror(installed.error()));
     return kExitFailure;
   }
-  auto sockets = mex::OpenGatewaySockets(p_config.gateway_, p_io);
+  auto sockets = mex::OpenGatewaySockets(p_config.gateway_);
   if (!sockets.has_value())
   {
     std::println(stderr, "mex_exchange: {}", sockets.error());
@@ -203,8 +183,8 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
         }
         gateway_ptr->Run();
       }};
-  std::println("mex_exchange: listening on {}:{} with {} engines, io {}",
-               p_config.gateway_.listen_address_, port, slots.size(), NameOf(p_io));
+  std::println("mex_exchange: listening on {}:{} with {} engines",
+               p_config.gateway_.listen_address_, port, slots.size());
   std::fflush(stdout);
 
   while (!stop_requested.load(std::memory_order_relaxed))
@@ -232,7 +212,6 @@ void RunEngine(std::stop_token p_stop, EngineSlot &p_slot, std::latch &p_ready, 
 
 struct Arguments
 {
-  GatewayIo io_ = GatewayIo::Epoll;
   std::optional<std::uint16_t> market_port_{};
   std::size_t next_ = 2;
 };
@@ -240,16 +219,6 @@ struct Arguments
 [[nodiscard]] std::optional<Arguments> ParseOptions(std::span<char *const> p_args)
 {
   Arguments options;
-  if (p_args.size() >= 4 && std::string_view{p_args[2]} == "--io")
-  {
-    const auto io = ParseGatewayIo(p_args[3]);
-    if (!io)
-    {
-      return std::nullopt;
-    }
-    options.io_ = *io;
-    options.next_ += 2;
-  }
   if (p_args.size() > options.next_ &&
       std::string_view{p_args[options.next_]} == "--market-data-port")
   {
@@ -267,6 +236,11 @@ struct Arguments
     options.market_port_ = port;
     options.next_ += 2;
   }
+  // Without this check, an unknown option and its value pass as a replica number and data path.
+  if (p_args.size() > options.next_ && std::string_view{p_args[options.next_]}.starts_with("--"))
+  {
+    return std::nullopt;
+  }
   if (p_args.size() != options.next_ && p_args.size() != options.next_ + 2)
   {
     return std::nullopt;
@@ -282,7 +256,7 @@ int main(int p_argc, char **p_argv)
   const auto options = ParseOptions(args);
   if (!options)
   {
-    std::println(stderr, "usage: mex_exchange <config path> [--io epoll|uring] "
+    std::println(stderr, "usage: mex_exchange <config path> "
                          "[--market-data-port <port>] [<replica number> <data path>]");
     return kExitUsage;
   }
@@ -322,7 +296,7 @@ int main(int p_argc, char **p_argv)
   auto *const market_publisher = market_data ? &*market_data : nullptr;
   if (!replicated)
   {
-    return RunExchange(*config, options->io_, market_publisher);
+    return RunExchange(*config, market_publisher);
   }
   const std::size_t next = options->next_;
   const std::string_view replica_text{args[next]};
@@ -341,7 +315,6 @@ int main(int p_argc, char **p_argv)
     std::println(stderr, "mex_exchange: sigaction: {}", std::strerror(installed.error()));
     return kExitFailure;
   }
-  return mex::RunReplicatedExchange(
-      *config, {.replica_ = replica, .data_path_ = args[next + 1], .io_ = options->io_},
-      stop_requested, market_publisher);
+  return mex::RunReplicatedExchange(*config, {.replica_ = replica, .data_path_ = args[next + 1]},
+                                    stop_requested, market_publisher);
 }

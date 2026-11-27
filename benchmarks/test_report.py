@@ -21,7 +21,7 @@ class RunnerTest(unittest.TestCase):
                 self.assertIn("Invalid benchmark setting", reject.call_args.args[0])
 
     def test_burst_rate_fraction_carries_across_windows(self):
-        args = argparse.Namespace(build=Path("/unused"), seconds=5, io="epoll")
+        args = argparse.Namespace(build=Path("/unused"), seconds=5)
         case = Case("active", 3, 2, 9)
         result = {"sessions": 3, "base_orders": 10, "burst_orders": 9,
                   "min_orders_per_session": 3, "scheduled_p100_ms": 15}

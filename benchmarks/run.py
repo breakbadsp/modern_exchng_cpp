@@ -73,10 +73,10 @@ def requested_cases(args):
             for count in counts for base in (args.rates or [400_000])]
 
 
-def saturation(build, case, orders, io):
+def saturation(build, case, orders):
     result = subprocess.run(
         ["timeout", "--kill-after=5", "60", str(REPO / "tools/perf_multi_client.sh"),
-         str(build), str(case.sessions), str(orders), str(case.window), "0", io],
+         str(build), str(case.sessions), str(orders), str(case.window), "0"],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
     log = result.stdout
@@ -91,11 +91,11 @@ def saturation(build, case, orders, io):
             "samples": int(match[4]), "operations": int(match[1]), "system_busy": int(match[5])}
 
 
-def reconnect_case(build, case, io):
+def reconnect_case(build, case):
     affinity = os.sched_getaffinity(0)
     try:
         os.sched_setaffinity(0, {2})
-        result = asyncio.run(reconnect.case(build, case.sessions, case.burst, io))
+        result = asyncio.run(reconnect.case(build, case.sessions, case.burst))
     finally:
         os.sched_setaffinity(0, affinity)
     steady, churn = result["steady"], result["reconnect"]
@@ -108,11 +108,11 @@ def reconnect_case(build, case, io):
 
 def run_case(args, library, case):
     if case.scenario == "saturation":
-        return saturation(args.build, case, args.orders, args.io)
+        return saturation(args.build, case, args.orders)
     if case.scenario == "reconnect":
-        return reconnect_case(args.build, case, args.io)
+        return reconnect_case(args.build, case)
     result = active.case(args.build, library, case.sessions, args.seconds, case.base, case.burst,
-                         hot_symbol=case.scenario == "hot-symbol", io=args.io)
+                         hot_symbol=case.scenario == "hot-symbol")
     expected_base = case.base * args.seconds
     expected_burst = args.seconds * case.burst // 5
     if (result["sessions"] != case.sessions or result["base_orders"] != expected_base
@@ -138,7 +138,7 @@ def environment(args):
     model = re.search(r"^model name\s*:\s*(.+)$", cpu, re.M)
     return {
         "started_utc": datetime.now(timezone.utc).isoformat(), "source_commit": revision,
-        "worktree_dirty": dirty, "io": args.io, "platform": platform.platform(),
+        "worktree_dirty": dirty, "platform": platform.platform(),
         "cpu": model[1] if model else None, "cpu_affinity": sorted(os.sched_getaffinity(0)),
         "memory_kib": os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // 1024,
         "file_descriptor_limits": resource.getrlimit(resource.RLIMIT_NOFILE),
@@ -203,7 +203,6 @@ def main():
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--orders", type=int, default=1_000_000)
     parser.add_argument("--target-ms", type=float, default=100)
-    parser.add_argument("--io", choices=("epoll", "uring"), default="epoll")
     args = parser.parse_args()
     if args.suite and any(value is not None for value in (args.sessions, args.rates, args.windows, args.burst)):
         parser.error("Use --scenario to set sessions, rates, windows, or burst size.")

@@ -1,6 +1,6 @@
 # Performance
 
-Book numbers come from `bench_book` (`tests/book_bench.cpp`), which compiles `src/book.cpp` at **`-O3 -DNDEBUG`**. The main test binary uses the Debug CMake preset; do not use it to judge throughput. End-to-end numbers (exchange and load generator over TCP) are in [End to end](#end-to-end-exchange-and-load-generator) and [many clients](#end-to-end-many-clients-one-symbol-each). How the gateway does client I/O, epoll compared with io_uring, and a comparison with TigerBeetle are in [Client I/O](#client-io).
+Book numbers come from `bench_book` (`tests/book_bench.cpp`), which compiles `src/book.cpp` at **`-O3 -DNDEBUG`**. The main test binary uses the Debug CMake preset; do not use it to judge throughput. End-to-end numbers (exchange and load generator over TCP) are in [End to end](#end-to-end-exchange-and-load-generator) and [many clients](#end-to-end-many-clients-one-symbol-each). How the gateway does client I/O, why it uses io_uring, and a comparison with TigerBeetle are in [Client I/O](#client-io).
 
 A single in-process client flow (`bench_client`), its CPU profile, and the measured effect of the last `Rest` and `SubmitLimitOrder` changes are in [the single-client profile](client-profile.md).
 
@@ -110,21 +110,25 @@ tools/perf_multi_client.sh build 4 400000 4096 25000     # open loop, 4 x 25k = 
 
 ### How the gateway does client I/O
 
-One gateway thread does all socket I/O. The engines make no system calls; they only use their SPSC queues. Each loop (`Gateway::PollOnce` in `src/gateway.cpp`) does these steps:
+One gateway thread does all socket I/O with io_uring. The engines make no system calls; they only use their SPSC queues. The ring has one multishot accept, one single-shot `recv` and at most one `send` in flight for each connection. It does not use SQPOLL, multishot receive, or registered buffers. Each loop (`Gateway::PollOnce` in `src/gateway.cpp`) does these steps:
 
-1. `epoll_wait` with timeout 0. The thread never sleeps. It uses one full core, and it does not pay a wake-up cost.
-2. For each new connection: `accept4` (non-blocking), `TCP_NODELAY`, and a slot in the fixed connection table.
-3. For each readable connection: one `recv` into the free space of its read buffer (64 frames). Decode every complete frame, validate it, and push it to the engine's inbound queue. Move the partial frame to the start of the buffer.
+1. Submit the queued SQEs, if any, then busy-poll the completion queue. The thread never sleeps. It uses one full core, and it does not pay a wake-up cost.
+2. For each accepted connection: `TCP_NODELAY`, a slot in the fixed connection table, and a `recv` into its read buffer (64 frames).
+3. For each completed `recv`: decode every complete frame, validate it, and push it to the engine's inbound queue. Move the partial frame to the start of the buffer, then arm the next `recv`.
 4. Pop the reports from each engine's outbound queue. Encode each report with the session's next seq into the connection's send buffer (1024 frames).
-5. For each connection with data: one `send` for all the reports of this loop. On `EAGAIN`, wait for `EPOLLOUT`. If a report does not fit after a flush, disconnect the client (slow consumer).
+5. For each connection with data and no send in flight: queue one `send` for all the reports of this loop. If a report does not fit, the gateway writes what the kernel takes now with a direct non-blocking `send`, unless a send is in flight. If it still does not fit, the gateway disconnects the client (slow consumer).
 
-The cost is about one `epoll_wait`, plus one `recv` and one `send` for each active connection, in each loop.
+Buffer ownership:
 
-### epoll compared with io_uring
+- While a send is in flight, the kernel reads those bytes, so the gateway does not move them. A send is still in flight during the outbound drain only if the socket buffer was full when the kernel tried it. Reports appended meanwhile must fit behind it in the 1024-frame send buffer, or the client is disconnected as a slow consumer.
+- A closed connection's slot is reused only after its recv and send have completed: Close cancels both (by user data) and closes the fd, and the slot returns to the free list on the last completion. Until then, a new connection beyond `max_connections` is closed.
+- `Run()` cancels all operations after `Stop()` and waits for them, so the buffers outlive every kernel access.
 
-The gateway has a second backend, selected with `mex_exchange <config> --io epoll|uring` (default `epoll`). The protocol logic is the same; only the I/O mechanism changes. The io_uring backend uses multishot accept, one single-shot `recv` and at most one `send` in flight for each connection, a busy-polled completion queue, and at most one `io_uring_submit` in each loop. It does not use SQPOLL, multishot receive, or registered buffers.
+The kernel must permit io_uring. The exchange stops at startup with an `io_uring_queue_init` error if `kernel.io_uring_disabled` or a seccomp profile refuses it. The default Docker seccomp profile refuses it; CI runs its container without that profile.
 
-Measured on the same machine with `tools/perf_multi_client.sh`, 2 runs for each case:
+### Why io_uring only
+
+The gateway had an epoll backend too, and it was the default. These numbers come from `tools/perf_multi_client.sh` on one machine, 2 runs for each case, with both backends:
 
 | Case | epoll | io_uring |
 |------|------:|---------:|
@@ -136,15 +140,14 @@ Measured on the same machine with `tools/perf_multi_client.sh`, 2 runs for each 
 | Open loop 200k ops/s, 8 clients, p99 us | 79–81 | 97–142 |
 | Open loop 400k ops/s, 1 client, p99 us | 9933–9958 | 9969–10012 |
 
-io_uring gives no clear improvement. epoll is 2–3% faster with 1 or 2 clients. With more clients, the run-to-run variation is larger than the difference. io_uring also has the gaps at 400k ops/s on one connection, so the cause of the gaps is not the epoll mechanism.
+Throughput is about equal: epoll is 2–3% faster with 1 or 2 clients, and with more clients the run-to-run variation is larger than the difference. The system calls are not the main cost. Each small frame needs the same decode, validation, routing, and encode work on the gateway thread.
 
-The reason: io_uring makes the system calls less frequent, but the system calls are not the main cost. One io_uring loop still makes about one `io_uring_submit`, and each small frame still needs the same decode, validation, routing, and encode work on the gateway thread.
+io_uring is kept, and epoll is removed, for these reasons:
 
-Differences in behavior:
+- Two backends doubled the I/O paths to test and reason about, for no measured gain.
+- The io_uring features that can reduce the cost for each message (SQPOLL, multishot receive with provided buffers, registered files and buffers) need the completion model. epoll has no path to them.
 
-- While a send is in flight, the kernel reads those bytes, so the gateway does not move them. A send is still in flight during the outbound drain only if the socket buffer was full when the kernel tried it. Reports appended meanwhile must fit behind it in the 1024-frame send buffer, or the client is disconnected as a slow consumer, which matches the epoll policy.
-- A closed connection's slot is reused only after its recv and send have completed: Close cancels both (by user data) and closes the fd, and the slot returns to the free list on the last completion. Until then, a new connection beyond `max_connections` is closed, as in epoll.
-- `Run()` cancels all operations after `Stop()` and waits for them, so the buffers outlive every kernel access.
+Measure again before you use a result from this table: it predates later gateway changes.
 
 ### Comparison with TigerBeetle
 
@@ -152,8 +155,8 @@ TigerBeetle (`src/message_bus.zig`, `src/stdx/io/linux.zig`, `src/message_buffer
 
 | | This exchange | TigerBeetle |
 |---|---|---|
-| I/O model | readiness (epoll), then `recv`/`send` | completion (io_uring): the kernel copies into buffers given in advance |
-| Wait | busy-poll, `epoll_wait` timeout 0 | blocks in `io_uring_enter` until a completion or a deadline |
+| I/O model | completion (io_uring), one `recv` and at most one `send` in flight for each connection | completion (io_uring): the kernel copies into buffers given in advance |
+| Wait | busy-polls the completion queue | blocks in `io_uring_enter` until a completion or a deadline |
 | Message | 23–48 bytes, one order or report | up to `message_size_max` (MiB scale), up to 8,190 events |
 | Requests in flight for each client | many | one |
 | Receive buffer for each connection | 64 frames | one full-size message |
@@ -164,10 +167,10 @@ TigerBeetle (`src/message_bus.zig`, `src/stdx/io/linux.zig`, `src/message_buffer
 
 Why the designs differ:
 
-- **Messages per system call.** TigerBeetle puts thousands of events in one message, so the cost of a system call is shared by many events. This exchange receives one order in each frame, so the gateway's work for each message is the main cost. This is why changing epoll to io_uring did not change our results.
+- **Messages per system call.** TigerBeetle puts thousands of events in one message, so the cost of a system call is shared by many events. This exchange receives one order in each frame, so the gateway's work for each message is the main cost. This is why changing epoll to io_uring did not change our throughput.
 - **Latency target.** Our target is microseconds, so the gateway busy-polls and uses one core all the time. TigerBeetle waits for disk writes and replica agreement, so a wake-up of some microseconds is not important, and it does not use a full core.
 - **Full send queue.** Our reports carry a seq number and v1 has no resend, so the gateway must not drop a report; it disconnects the client. TigerBeetle can drop a reply, because each client has one request in flight and retries it until it gets a reply.
-- **Buffer lifetime.** With a completion model, the kernel owns a buffer until the operation completes. TigerBeetle and our io_uring backend both wait for all I/O in flight on a connection before they use its slot again.
+- **Buffer lifetime.** With a completion model, the kernel owns a buffer until the operation completes. TigerBeetle and our gateway both wait for all I/O in flight on a connection before they use its slot again.
 
 Possible next steps, in order of expected effect:
 

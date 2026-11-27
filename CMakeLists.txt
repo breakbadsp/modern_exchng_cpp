@@ -74,7 +74,7 @@ if(MEX_SANITIZER_LIST)
     add_link_options(-fsanitize=${MEX_SANITIZER_CSV})
 endif()
 
-# The gateway's io_uring backend.
+# The gateway's client I/O.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBURING REQUIRED IMPORTED_TARGET liburing)
 
@@ -183,12 +183,7 @@ add_test(NAME exchange_smoke
         $<TARGET_FILE:mex_exchange> $<TARGET_FILE:mex_loadgen>
         ${CMAKE_CURRENT_SOURCE_DIR}/config/example.cfg
         ${CMAKE_CURRENT_BINARY_DIR}/exchange_smoke)
-add_test(NAME exchange_smoke_uring
-    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/exchange_smoke_test.sh
-        $<TARGET_FILE:mex_exchange> $<TARGET_FILE:mex_loadgen>
-        ${CMAKE_CURRENT_SOURCE_DIR}/config/example.cfg
-        ${CMAKE_CURRENT_BINARY_DIR}/exchange_smoke_uring uring)
-set_tests_properties(exchange_smoke exchange_smoke_uring PROPERTIES TIMEOUT 60)
+set_tests_properties(exchange_smoke PROPERTIES TIMEOUT 60)
 # Three replicas on loopback: failover, restart, and equal state.
 add_test(NAME replicated_smoke
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/replicated_smoke_test.sh

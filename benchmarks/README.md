@@ -40,7 +40,7 @@ python3 -B benchmarks/run.py --scenario active --sessions 1024 4096 8192 \
 python3 -B benchmarks/run.py --scenario reconnect --sessions 65536 --burst 512 \
   --out /tmp/mex-reconnect
 python3 -B benchmarks/run.py --scenario saturation --sessions 1 8 --windows 64 512 4096 \
-  --io epoll --out /tmp/mex-saturation
+  --out /tmp/mex-saturation
 ```
 
 ## Interpret the limits
@@ -62,7 +62,6 @@ The legacy load generator reports NewOrder-to-first-report P100.
 
 These are standalone, local TCP tests. The active scenarios use resting
 orders and cancels. The saturation mix also exercises matches.
-Record network and replication behavior with separate tests. The default
-backend is `epoll`. Use `--io uring` for an independent run on a host that
-supports it. The active runner builds its native timed loop with GCC 16
+Record network and replication behavior with separate tests. The exchange
+uses io_uring, so the host must permit it. The active runner builds its native timed loop with GCC 16
 and uses the exchange wire codec. All sockets connect to loopback.

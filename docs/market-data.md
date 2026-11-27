@@ -18,8 +18,7 @@ configuration, run:
 
 The feed uses the IPv4 address in the gateway configuration. Omit
 `--market-data-port` to disable the feed. A port of `0` asks the OS for a free
-port. The exchange prints the assigned port. Put `--io` before the market-data
-option if you use both options. When you run replicas on the same host, give
+port. The exchange prints the assigned port. When you run replicas on the same host, give
 each replica a different market-data port.
 
 The client binds to loopback by default. Use `--feed-host` to connect to another

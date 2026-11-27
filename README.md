@@ -61,11 +61,10 @@ Configure fails if CMake is not using Ninja (`-G Ninja` or the preset above), if
 `mex_exchange` reads one config file ([`config/example.cfg`](config/example.cfg) documents the syntax), starts one pinned thread per engine and a gateway thread, and stops on SIGINT or SIGTERM. A core that cannot be pinned is a warning, not an error. Configuration input has a 1 MiB limit, including whitespace and comments.
 
 ```bash
-./build/mex_exchange config/example.cfg              # epoll client I/O (default)
-./build/mex_exchange config/example.cfg --io uring   # io_uring client I/O
+./build/mex_exchange config/example.cfg
 ```
 
-The io_uring backend needs liburing (`pkg-config liburing`) to build; see [Client I/O](docs/performance.md#client-io).
+Client I/O uses io_uring. The build needs liburing (`pkg-config liburing`), and the kernel must permit io_uring; see [Client I/O](docs/performance.md#client-io).
 
 `mex_loadgen` logs on as one session, sends a mix of NewOrder, Cancel, and Replace, and prints throughput and NewOrder -> first report latency. It exits non-zero if logon fails, a seq gap is seen, the connection fails, or a request is rejected as `DuplicateRequest`. `--help` lists the options.
 
@@ -154,7 +153,7 @@ decisions: [`prep/io-design-spec.md`](prep/io-design-spec.md).
 - [x] `spsc_queue.hpp`: ring buffer plus a two-thread stress test
 - [x] `protocol.hpp`: wire structs, encode/decode, partial-frame handling; unit tests without sockets
 - [x] `engine.hpp/.cpp`: driven through its queues in tests, no network; covers id generation, ownership checks, and maker-before-claim
-- [x] `gateway.hpp/.cpp`: epoll, connection table, routing, writes
+- [x] `gateway.hpp/.cpp`: io_uring, connection table, routing, writes
 - [x] `main.cpp` + a load-generator client for end-to-end throughput against the 100k–500k ops/s target
 
 ## License

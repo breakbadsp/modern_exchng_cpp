@@ -50,7 +50,7 @@ adds those.
                │  ▲
                ▼  │
    ┌─────────────────────────────┐
-   │  Gateway thread (1)         │  epoll, accept, logon, framing,
+   │  Gateway thread (1)         │  io_uring, accept, logon, framing,
    │  - connections[]            │  validation, symbol → engine routing,
    │  - sessions[]               │  socket writes
    └─────────────────────────────┘
@@ -356,7 +356,7 @@ Stated so each one is a decision, not an accident:
 - **Replication.** Done with libvsr; see `docs/replication.md`.
 - **Market data feed.** Would be an extra outbound queue per engine.
 - **FIX**, **TLS**, **multiple gateways**, **kernel bypass**. Transport is
-  kernel TCP with non-blocking sockets and level-triggered epoll.
+  kernel TCP with non-blocking sockets and io_uring.
 
 ## Replication preparation (locked)
 
@@ -491,7 +491,7 @@ Each step is testable on its own:
    Covers the client-id index, duplicate reject, ownership,
    maker-before-claim, Replace total-qty math, and `Done`.
 5. Config parser — unit tests with good and bad files.
-6. `gateway.hpp/.cpp` — epoll, logon, connection and session tables,
+6. `gateway.hpp/.cpp` — io_uring, logon, connection and session tables,
    routing, writes.
 7. `main.cpp` + a load-generator client for end-to-end throughput against
    the 100k–500k ops/s target.
@@ -524,4 +524,4 @@ Gateway choices made in step 6:
   already logged on closes it, as any frame out of order does.
 - A bad side or order type is a malformed frame (the decoder rejects it),
   so it closes the connection instead of sending a Reject.
-- The gateway busy-polls (`epoll_wait` timeout 0), like the engines.
+- The gateway busy-polls the io_uring completion queue, like the engines.

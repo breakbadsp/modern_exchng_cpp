@@ -292,11 +292,10 @@
     <details>
       <summary>What does the gateway own?</summary>
       <p><code>mex-gateway</code> owns the client sockets, connection and session
-        tables, frame parsing, routing, and socket writes. Both I/O boxes show the
-        same thread. Each loop polls for client I/O, drains up to one ring capacity
-        of reports per engine, then flushes pending writes. <code>epoll</code> polls
-        with zero timeout. <code>io_uring</code> uses the gateway as its single
-        userspace issuer. A short-lived helper creates the ring at startup.</p>
+        tables, frame parsing, routing, and socket writes. Each loop polls the
+        <code>io_uring</code> completion queue, drains up to one ring capacity of
+        reports per engine, then submits pending sends. The gateway is the single
+        userspace issuer of the ring. A short-lived helper creates the ring at startup.</p>
     </details>
     <details>
       <summary>What does commit guarantee?</summary>

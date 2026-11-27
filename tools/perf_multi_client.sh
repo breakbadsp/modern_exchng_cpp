@@ -5,12 +5,11 @@
 # and the clients on cores 0-2, so they do not share a core.
 #
 # Usage: tools/perf_multi_client.sh <build dir> <clients 1-8> <orders per client> \
-#          <window> <rate per client, 0 = closed loop> [epoll|uring]
-# The I/O backend argument needs a mex_exchange that accepts --io.
+#          <window> <rate per client, 0 = closed loop>
 set -euo pipefail
 
-if (( $# < 5 || $# > 6 )) || [[ ! $2 =~ ^[1-8]$ ]]; then
-  echo "usage: $0 <build dir> <clients 1-8> <orders> <window> <rate> [epoll|uring]" >&2
+if (( $# != 5 )) || [[ ! $2 =~ ^[1-8]$ ]]; then
+  echo "usage: $0 <build dir> <clients 1-8> <orders> <window> <rate>" >&2
   exit 2
 fi
 
@@ -19,7 +18,6 @@ clients=$2
 orders=$3
 window=$4
 rate=$5
-io=${6:-}
 
 work=$(mktemp -d)
 exchange=''
@@ -46,11 +44,7 @@ port=$((20000 + RANDOM % 20000))
   echo "gateway outbound_queue_capacity 65536"
 } > "$work/exchange.cfg"
 
-io_args=()
-if [[ -n "$io" ]]; then
-  io_args=(--io "$io")
-fi
-taskset -c 3-5 "$build/mex_exchange" "$work/exchange.cfg" "${io_args[@]}" > "$work/exchange.log" 2>&1 &
+taskset -c 3-5 "$build/mex_exchange" "$work/exchange.cfg" > "$work/exchange.log" 2>&1 &
 exchange=$!
 for _ in $(seq 50); do
   if ss -ltn | grep -q ":$port "; then

@@ -43,7 +43,6 @@ using mex::Config;
 using mex::Engine;
 using mex::EngineQueues;
 using mex::Gateway;
-using mex::GatewayIo;
 using mex::Price;
 using mex::Quantity;
 using mex::Report;
@@ -114,7 +113,7 @@ struct Options
 class Exchange final
 {
 public:
-  explicit Exchange(GatewayIo p_io, const Options &p_options = {})
+  explicit Exchange(const Options &p_options = {})
   {
     auto config =
         mex::ParseConfig(std::format(kConfigFormat, p_options.max_connections_,
@@ -137,7 +136,7 @@ public:
                                                   config->sessions_.size(), *inbound_.back(),
                                                   *outbound_.back()));
     }
-    auto sockets = mex::OpenGatewaySockets(config->gateway_, p_io);
+    auto sockets = mex::OpenGatewaySockets(config->gateway_);
     if (!sockets.has_value())
     {
       ADD_FAILURE() << sockets.error();
@@ -399,16 +398,12 @@ void Push(SpscQueue<Report> &p_queue, const Report &p_report)
   EXPECT_TRUE(WaitFor([&] { return p_queue.TryPush(p_report); }));
 }
 
-class GatewayTest : public ::testing::TestWithParam<GatewayIo>
-{
-};
-
 // ---------------------------------------------------------------------------
 // Logon
 
-TEST_P(GatewayTest, LogonIsAckedWithSeqOne)
+TEST(Gateway, LogonIsAckedWithSeqOne)
 {
-  const Exchange exchange{GetParam()};
+  const Exchange exchange{};
   const Client alice{exchange.Port()};
 
   alice.Send(AliceLogon());
@@ -417,13 +412,13 @@ TEST_P(GatewayTest, LogonIsAckedWithSeqOne)
 }
 
 // Stop with more pending accepts than the gateway can service in one poll.
-TEST(GatewayShutdown, UringClosesClientsThatConnectDuringShutdown)
+TEST(GatewayShutdown, ClosesClientsThatConnectDuringShutdown)
 {
   constexpr std::size_t kClients = 32;
   std::vector<Client> pending;
   pending.reserve(kClients);
   {
-    Exchange exchange{GatewayIo::Uring, Options{.max_connections_ = 1}};
+    Exchange exchange{Options{.max_connections_ = 1}};
     Client alice{exchange.Port()};
     alice.Send(AliceLogon());
     static_cast<void>(Next<wire::LogonAck>(alice, 1));
@@ -441,9 +436,9 @@ TEST(GatewayShutdown, UringClosesClientsThatConnectDuringShutdown)
   }
 }
 
-TEST_P(GatewayTest, BadTokenIsRejectedAndClosed)
+TEST(Gateway, BadTokenIsRejectedAndClosed)
 {
-  const Exchange exchange{GetParam()};
+  const Exchange exchange{};
   const Client client{exchange.Port()};
 
   client.Send(LogonOf("alice", "wrong"));
@@ -452,9 +447,9 @@ TEST_P(GatewayTest, BadTokenIsRejectedAndClosed)
   EXPECT_TRUE(client.IsClosedByPeer());
 }
 
-TEST_P(GatewayTest, UnknownSessionIsRejectedAndClosed)
+TEST(Gateway, UnknownSessionIsRejectedAndClosed)
 {
-  const Exchange exchange{GetParam()};
+  const Exchange exchange{};
   const Client client{exchange.Port()};
 
   client.Send(LogonOf("mallory", "alice-token"));
@@ -463,9 +458,9 @@ TEST_P(GatewayTest, UnknownSessionIsRejectedAndClosed)
   EXPECT_TRUE(client.IsClosedByPeer());
 }
 
-TEST_P(GatewayTest, SecondLogonForAnActiveSessionIsRejected)
+TEST(Gateway, SecondLogonForAnActiveSessionIsRejected)
 {
-  const Exchange exchange{GetParam()};
+  const Exchange exchange{};
   const Client first{exchange.Port()};
   first.Send(AliceLogon());
   static_cast<void>(Next<wire::LogonAck>(first, 1));
@@ -480,9 +475,9 @@ TEST_P(GatewayTest, SecondLogonForAnActiveSessionIsRejected)
   EXPECT_EQ(Next<wire::Reject>(first, 2).reason_, Reason::UnknownSymbol);
 }
 
-TEST_P(GatewayTest, OrderBeforeLogonClosesWithoutReply)
+TEST(Gateway, OrderBeforeLogonClosesWithoutReply)
 {
-  const Exchange exchange{GetParam()};
+  const Exchange exchange{};
   const Client client{exchange.Port()};
 
   client.Send(Limit(1, 7, Side::Buy, 150, 10));
@@ -490,9 +485,9 @@ TEST_P(GatewayTest, OrderBeforeLogonClosesWithoutReply)
   EXPECT_TRUE(client.IsClosedByPeer());
 }
 
-TEST_P(GatewayTest, LogonOnALoggedOnConnectionCloses)
+TEST(Gateway, LogonOnALoggedOnConnectionCloses)
 {
-  const Exchange exchange{GetParam()};
+  const Exchange exchange{};
   const Client alice{exchange.Port()};
   alice.Send(AliceLogon());
   static_cast<void>(Next<wire::LogonAck>(alice, 1));
@@ -502,9 +497,9 @@ TEST_P(GatewayTest, LogonOnALoggedOnConnectionCloses)
   EXPECT_TRUE(alice.IsClosedByPeer());
 }
 
-TEST_P(GatewayTest, ConnectionBeyondMaxConnectionsIsClosed)
+TEST(Gateway, ConnectionBeyondMaxConnectionsIsClosed)
 {
-  const Exchange exchange{GetParam(), {.max_connections_ = 1}};
+  const Exchange exchange{{.max_connections_ = 1}};
   const Client alice{exchange.Port()};
   alice.Send(AliceLogon());
   static_cast<void>(Next<wire::LogonAck>(alice, 1));
@@ -519,9 +514,9 @@ TEST_P(GatewayTest, ConnectionBeyondMaxConnectionsIsClosed)
 // ---------------------------------------------------------------------------
 // Framing
 
-TEST_P(GatewayTest, MalformedFrameClosesTheConnection)
+TEST(Gateway, MalformedFrameClosesTheConnection)
 {
-  const Exchange exchange{GetParam()};
+  const Exchange exchange{};
   const Client alice{exchange.Port()};
   alice.Send(AliceLogon());
   static_cast<void>(Next<wire::LogonAck>(alice, 1));
@@ -539,9 +534,9 @@ TEST_P(GatewayTest, MalformedFrameClosesTheConnection)
   EXPECT_TRUE(bob.IsClosedByPeer());
 }
 
-TEST_P(GatewayTest, PartialAndCoalescedFramesAreReassembled)
+TEST(Gateway, PartialAndCoalescedFramesAreReassembled)
 {
-  const Exchange exchange{GetParam()};
+  const Exchange exchange{};
   const Client alice{exchange.Port()};
 
   alice.SendByteByByte(AliceLogon());
@@ -566,9 +561,9 @@ TEST_P(GatewayTest, PartialAndCoalescedFramesAreReassembled)
 // ---------------------------------------------------------------------------
 // Validation and routing
 
-TEST_P(GatewayTest, InvalidOrdersAreRejectedBeforeTheEngine)
+TEST(Gateway, InvalidOrdersAreRejectedBeforeTheEngine)
 {
-  const Exchange exchange{GetParam()};
+  const Exchange exchange{};
   const Client alice{exchange.Port()};
   alice.Send(AliceLogon());
   static_cast<void>(Next<wire::LogonAck>(alice, 1));
@@ -631,9 +626,9 @@ TEST_P(GatewayTest, InvalidOrdersAreRejectedBeforeTheEngine)
       (wire::Done{.client_order_id_ = 10, .symbol_id_ = 8, .reason_ = Reason::MarketRemainder}));
 }
 
-TEST_P(GatewayTest, OrdersAreRoutedToTheirEngineAndSlot)
+TEST(Gateway, OrdersAreRoutedToTheirEngineAndSlot)
 {
-  const Exchange exchange{GetParam(), {.run_engines_ = false}};
+  const Exchange exchange{{.run_engines_ = false}};
   const Client alice{exchange.Port()};
   const Client bob{exchange.Port()};
   alice.Send(AliceLogon());
@@ -663,9 +658,9 @@ TEST_P(GatewayTest, OrdersAreRoutedToTheirEngineAndSlot)
   EXPECT_EQ(engine_1->op_number_, mex::OpNumber{2});
 }
 
-TEST_P(GatewayTest, FullInboundQueueRejectsWithSystemBusy)
+TEST(Gateway, FullInboundQueueRejectsWithSystemBusy)
 {
-  const Exchange exchange{GetParam(), {.inbound_capacity_ = 1, .run_engines_ = false}};
+  const Exchange exchange{{.inbound_capacity_ = 1, .run_engines_ = false}};
   const Client alice{exchange.Port()};
   alice.Send(AliceLogon());
   static_cast<void>(Next<wire::LogonAck>(alice, 1));
@@ -704,9 +699,9 @@ TEST_P(GatewayTest, FullInboundQueueRejectsWithSystemBusy)
 // ---------------------------------------------------------------------------
 // Outbound
 
-TEST_P(GatewayTest, SlowConsumerIsDisconnectedWithoutStallingOthers)
+TEST(Gateway, SlowConsumerIsDisconnectedWithoutStallingOthers)
 {
-  const Exchange exchange{GetParam(), {.run_engines_ = false}};
+  const Exchange exchange{{.run_engines_ = false}};
   constexpr int kSmallReceiveBuffer = 4096;
   const Client alice{exchange.Port(), kSmallReceiveBuffer};
   alice.Send(AliceLogon());
@@ -744,11 +739,11 @@ TEST_P(GatewayTest, SlowConsumerIsDisconnectedWithoutStallingOthers)
 }
 
 // The only slot is closed while its recv waits and its send is stuck behind a
-// full socket buffer. With io_uring the kernel still owns both buffers then. A
+// full socket buffer. The kernel still owns both buffers then. A
 // new client gets the slot only after that, and sees only its own frames.
-TEST_P(GatewayTest, SlotOfASlowConsumerIsReusedCleanly)
+TEST(Gateway, SlotOfASlowConsumerIsReusedCleanly)
 {
-  const Exchange exchange{GetParam(), {.max_connections_ = 1, .run_engines_ = false}};
+  const Exchange exchange{{.max_connections_ = 1, .run_engines_ = false}};
   constexpr int kSmallReceiveBuffer = 4096;
   const Client alice{exchange.Port(), kSmallReceiveBuffer};
   alice.Send(AliceLogon());
@@ -784,11 +779,10 @@ TEST_P(GatewayTest, SlotOfASlowConsumerIsReusedCleanly)
 
 // More than one send buffer of reports for one session in one drain pass, to
 // a client whose socket buffer has room: the gateway writes as it goes.
-TEST_P(GatewayTest, BurstLargerThanTheSendBufferIsDelivered)
+TEST(Gateway, BurstLargerThanTheSendBufferIsDelivered)
 {
   constexpr std::uint64_t kReports = mex::kSendBufferSize / wire::kFrameSize<wire::Reject> + 64;
-  Exchange exchange{GetParam(),
-                    {.outbound_capacity_ = std::bit_ceil(static_cast<std::uint32_t>(kReports)),
+  Exchange exchange{{.outbound_capacity_ = std::bit_ceil(static_cast<std::uint32_t>(kReports)),
                      .run_engines_ = false}};
   const Client alice{exchange.Port()};
   alice.Send(AliceLogon());
@@ -811,14 +805,13 @@ TEST_P(GatewayTest, BurstLargerThanTheSendBufferIsDelivered)
 
 // A client that reads steadily while its socket buffers stay full: the unsent
 // reports never exceed most of the send buffer, but many buffers pass through it.
-TEST_P(GatewayTest, SlowReaderThatKeepsUpIsNotDisconnected)
+TEST(Gateway, SlowReaderThatKeepsUpIsNotDisconnected)
 {
   constexpr int kSmallBuffer = 4096;
   constexpr std::uint64_t kFrame = wire::kFrameSize<wire::Reject>;
   constexpr std::uint64_t kBacklog = mex::kSendBufferSize * 3 / 4 / kFrame;
   constexpr std::uint64_t kReports = 8 * mex::kSendBufferSize / kFrame;
   const Exchange exchange{
-      GetParam(),
       {.outbound_capacity_ = 1024, .run_engines_ = false, .send_buffer_ = kSmallBuffer}};
   const Client alice{exchange.Port(), kSmallBuffer};
   alice.Send(AliceLogon());
@@ -849,9 +842,9 @@ TEST_P(GatewayTest, SlowReaderThatKeepsUpIsNotDisconnected)
 }
 
 // Reports stay with their session after another client reuses its socket slot.
-TEST_P(GatewayTest, ReportForASessionWithoutConnectionIsDropped)
+TEST(Gateway, ReportForASessionWithoutConnectionIsDropped)
 {
-  const Exchange exchange{GetParam(), {.max_connections_ = 1, .run_engines_ = false}};
+  const Exchange exchange{{.max_connections_ = 1, .run_engines_ = false}};
 
   Push(exchange.Outbound(0), RejectFor(kBob, 1)); // bob never logged on
   EXPECT_TRUE(WaitFor([&] { return exchange.Gate().DroppedReports() == 1; }));
@@ -901,9 +894,9 @@ TEST_P(GatewayTest, ReportForASessionWithoutConnectionIsDropped)
   EXPECT_EQ(Next<wire::Reject>(*alice, 2).client_order_id_, 3U);
 }
 
-TEST_P(GatewayTest, SessionKeepsItsRestingOrderAcrossReconnect)
+TEST(Gateway, SessionKeepsItsRestingOrderAcrossReconnect)
 {
-  const Exchange exchange{GetParam()};
+  const Exchange exchange{};
   {
     const Client alice{exchange.Port()};
     alice.Send(AliceLogon());
@@ -934,9 +927,9 @@ TEST_P(GatewayTest, SessionKeepsItsRestingOrderAcrossReconnect)
             (wire::CancelAck{.client_order_id_ = 1, .symbol_id_ = 7}));
 }
 
-TEST_P(GatewayTest, EndToEndTradeWithSeqPerSession)
+TEST(Gateway, EndToEndTradeWithSeqPerSession)
 {
-  const Exchange exchange{GetParam()};
+  const Exchange exchange{};
   const Client alice{exchange.Port()};
   const Client bob{exchange.Port()};
   alice.Send(AliceLogon());
@@ -985,10 +978,5 @@ TEST_P(GatewayTest, EndToEndTradeWithSeqPerSession)
   EXPECT_EQ(on_engine_1.symbol_id_, 8U);
   EXPECT_EQ(on_engine_1.leaves_, Quantity{3});
 }
-
-INSTANTIATE_TEST_SUITE_P(Backends, GatewayTest,
-                         ::testing::Values(GatewayIo::Epoll, GatewayIo::Uring),
-                         [](const ::testing::TestParamInfo<GatewayIo> &p_info)
-                         { return p_info.param == GatewayIo::Uring ? "Uring" : "Epoll"; });
 
 } // namespace
