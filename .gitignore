@@ -1,3 +1,6 @@
 build/
 build-asan-ubsan/
 __pycache__/
+# perf record output
+*.data
+*.data.old
