@@ -235,6 +235,10 @@ def print_kaizen_rules(targets):
             module = Path(entry["module"])
             paths.append(f"verification/TLA/{module.parent}/{module.stem}*")
         print(f"tla-{name}\t{' '.join(paths)}\tverification/TLA/run check {name}")
+    print("lean-verification\tsrc/book.* src/market_data.* verification/Lean/* "
+          "verification/TLA/matching/replay.cpp\t"
+          '''ctest --test-dir "${MEX_VERIFY_BUILD:-build}" -R '^lean_verification$' '''
+          "--output-on-failure --no-tests=error")
 
 
 def ctest_command(build, tests):

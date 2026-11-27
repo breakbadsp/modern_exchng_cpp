@@ -48,7 +48,7 @@ tool failures fail the check.
 | Loadgen | The generator's tracked-order FIFO and request sequence. | A loopback peer checks 8,192 real requests, including symbol, order ID, sequence, and cancel order. |
 | FaultGame | Three abstract replicas, verification ownership, and a result based on sampled commit positions. | The existing fault game test drives seven real replica processes, faults, recovery, and agreement checks. |
 | libvsr | Upstream quorum, durable commit, view change, and journal recovery. | Run the pinned model, its mutation configurations, and MEX's replicated smoke test. |
-| Market data | One writer and one reader exchange ownership of three fixed slots. A ready slot contains the latest complete view. | A concurrent C++ test checks view coherence and the final write. A socket and HTTP test checks depth publication, a client gap, and restart recovery. |
+| Market data | One writer and one reader exchange ownership of three fixed slots. A ready slot contains the latest complete view. | A concurrent C++ test checks view coherence and the final write. A socket and HTTP test checks depth publication, a client gap, and restart recovery. [Lean replay](../Lean/README.md) checks the depth content and order. |
 
 The [catalog](catalog.json) has the exact bounds and CTest mappings. Each MEX
 model has a deliberate incorrect behavior that must fail. Replay currently

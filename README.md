@@ -93,6 +93,11 @@ cmake --build build --target format              # rewrite sources to match .cla
 cmake --build build --target clang-format-check  # verify (non-zero if drift)
 ```
 
+## Verification
+
+Use [Lean](verification/Lean/README.md) for matching and market depth replay.
+Use [TLA+](verification/TLA/README.md) for bounded protocol and concurrency checks.
+
 ## Performance
 
 Use the [performance framework](benchmarks/README.md) to test active
